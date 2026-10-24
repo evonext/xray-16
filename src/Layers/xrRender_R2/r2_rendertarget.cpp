@@ -336,11 +336,15 @@ CRenderTarget::CRenderTarget()
         rt_Generic.create(r2_RT_generic, w, h, D3DFMT_A8R8G8B8, 1);
 #ifdef XR_PLATFORM_WEB
         rt_Forward.create("$user$forward", w, h, D3DFMT_A8R8G8B8, 1);
+#endif
 #if defined(XR_DLSS)
         if (dlss_scaled)
+        {
             rt_DLSS_Out.create("$user$dlss_out", rt_Base_Depth_full->dwWidth, rt_Base_Depth_full->dwHeight,
                 rt_Color->fmt, 1, 1, { CRT::CreateUAV });
-#endif
+            if (!rt_DLSS_Out._get() || !rt_DLSS_Out->pSurface)
+                Msg("! [DLSS] cannot create upscaled output target (format %d)", rt_Color->fmt);
+        }
 #endif
 
         if (!options.msaa)

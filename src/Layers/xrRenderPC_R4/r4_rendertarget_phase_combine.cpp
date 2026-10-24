@@ -445,9 +445,10 @@ void CRenderTarget::phase_combine()
         in.color->GetDesc(&color_desc);
         in.width = color_desc.Width;
         in.height = color_desc.Height;
-        in.output = dlss_scaled ? rt_DLSS_Out->pSurface : nullptr;
-        in.outWidth = dlss_scaled ? rt_DLSS_Out->dwWidth : in.width;
-        in.outHeight = dlss_scaled ? rt_DLSS_Out->dwHeight : in.height;
+        const bool has_out = dlss_scaled && rt_DLSS_Out._get() && rt_DLSS_Out->pSurface;
+        in.output = has_out ? rt_DLSS_Out->pSurface : nullptr;
+        in.outWidth = has_out ? rt_DLSS_Out->dwWidth : in.width;
+        in.outHeight = has_out ? rt_DLSS_Out->dwHeight : in.height;
         in.view = Device.mView;
         in.projUnjittered = Device.mProject;
         in.projUnjittered._31 -= Device.mProjectJitterApplied.x;
@@ -464,7 +465,7 @@ void CRenderTarget::phase_combine()
             D3D11_TEXTURE2D_DESC color_desc;
             rt_Color->pSurface->GetDesc(&color_desc);
             dlss::NextJitter(color_desc.Width, color_desc.Height,
-                dlss_scaled ? rt_DLSS_Out->dwWidth : color_desc.Width, jitter_px, jitter_ndc);
+                (dlss_scaled && rt_DLSS_Out._get()) ? rt_DLSS_Out->dwWidth : color_desc.Width, jitter_px, jitter_ndc);
         }
         else
             jitter_ndc.set(0.f, 0.f);
@@ -477,7 +478,7 @@ void CRenderTarget::phase_combine()
         dlss_end_scene();
         // post-process samples "$user$albedo" (rt_Color): point it at the upscaled image.
         // If DLSS failed this frame, PP simply stretches the low-res scene.
-        if (dlss_done)
+        if (dlss_done && rt_DLSS_Out._get() && rt_DLSS_Out->pSurface)
         {
             rt_Color->pTexture->surface_set(rt_DLSS_Out->pSurface);
             RCache.Invalidate();
