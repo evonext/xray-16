@@ -6,6 +6,7 @@
 #include "dx11DLSS.h"
 #include "Layers/xrRender/xrRender_console.h"
 
+#include <atomic>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -99,6 +100,19 @@ NVSDK_NGX_Result NVSDK_CONV nr_scaling_ratio_cb(NVSDK_NGX_Parameter* params)
     return NVSDK_NGX_Result_Success;
 }
 
+std::atomic<int> nr_log_lines{ 0 };
+void NVSDK_CONV nr_ngx_log(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature feature)
+{
+    if (!message || nr_log_lines.fetch_add(1) > 600)
+        return;
+    string1024 line;
+    xr_strcpy(line, message);
+    for (char* c = line; *c; ++c)
+        if (*c == '\n' || *c == '\r')
+            *c = ' ';
+    Msg("- [NGX:%d] %s", int(feature), line);
+}
+
 bool init_d3d12(ID3D11Device* device11, ID3D11DeviceContext* ctx11)
 {
     nr_d3d12_dll = LoadLibraryW(L"d3d12.dll");
@@ -172,8 +186,13 @@ bool init_d3d12(ID3D11Device* device11, ID3D11DeviceContext* ctx11)
 
     // NGX on the D3D12 device
     const std::wstring logs = logs_dir_w();
+    // NGX log lines go to the game log (verbose), so feature failures can be diagnosed
+    NVSDK_NGX_FeatureCommonInfo common{};
+    common.LoggingInfo.LoggingCallback = &nr_ngx_log;
+    common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+    common.LoggingInfo.DisableOtherLoggingSinks = false;
     NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init_with_ProjectID(
-        NGX_PROJECT_ID_NR, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "OpenXRay", logs.c_str(), nr_dev12);
+        NGX_PROJECT_ID_NR, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "OpenXRay", logs.c_str(), nr_dev12, &common);
     if (NVSDK_NGX_FAILED(r))
     {
         Msg("! [DLSS-NR] NGX D3D12 init failed: 0x%08x", r);
@@ -312,7 +331,7 @@ bool ensure_nr_feature(u32 w, u32 h)
 
     set_common_size_params(w, h);
     NVSDK_NGX_Parameter_SetUI(g_nr_params, "DLSSNR.Hint.Render.Preset", unsigned(preset));
-    NVSDK_NGX_Parameter_SetI(g_nr_params, NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_DLAA);
+    NVSDK_NGX_Parameter_SetI(g_nr_params, NVSDK_NGX_Parameter_PerfQualityValue, 0); // as the RenoDX DLSS5 add-on does
     NVSDK_NGX_Parameter_SetI(g_nr_params, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, NVSDK_NGX_DLSS_Feature_Flags_MVLowRes);
     NVSDK_NGX_Parameter_SetUI(g_nr_params, NVSDK_NGX_Parameter_CreationNodeMask, 1);
     NVSDK_NGX_Parameter_SetUI(g_nr_params, NVSDK_NGX_Parameter_VisibilityNodeMask, 1);
