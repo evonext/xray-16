@@ -139,6 +139,11 @@ public:
     Fmatrix mInvView{};
     Fmatrix mProject{};
     Fmatrix mFullTransform{};
+
+    // Sub-pixel projection jitter (NDC) for temporal upscalers (DLSS).
+    // Renderer writes mProjectJitter for the next frame; camera applies it and stores mProjectJitterApplied.
+    Fvector2 mProjectJitter{};
+    Fvector2 mProjectJitterApplied{};
     Fmatrix mInvFullTransform{};
 
     // Copies of corresponding members. Used for synchronization.

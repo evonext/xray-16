@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "dx11HW.h"
+#include "dx11DLSS.h"
 
 #include "StateManager/dx11SamplerStateCache.h"
 #include "dx11TextureUtils.h"
@@ -434,6 +435,10 @@ bool CHW::ThisInstanceIsGlobal() const
 
 void CHW::DestroyDevice()
 {
+#if defined(XR_DLSS)
+    if (ThisInstanceIsGlobal())
+        dlss::Shutdown(pDevice);
+#endif
     if (ThisInstanceIsGlobal()) // only if we are global HW
     {
         RSManager.ClearStateArray();

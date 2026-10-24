@@ -151,6 +151,11 @@ float ps_r__tf_Mipbias = 0.0f;
 
 int ps_r__clear_models_on_unload = 0; // Alundaio
 
+int ps_r__dlss = 0;
+int ps_r__dlss_preset = 0;
+int ps_r__dlss_jitter = 1;
+int ps_r__dlss_jsign = 0;
+
 // R1
 float ps_r1_ssaLOD_A = 64.f;
 float ps_r1_ssaLOD_B = 48.f;
@@ -771,6 +776,12 @@ void xrRender_initconsole()
     CMD2(CCC_tf_MipBias, "r2_tf_mipbias", &ps_r__tf_Mipbias); // {-3 +3}
 
     CMD4(CCC_Integer, "r__clear_models_on_unload", &ps_r__clear_models_on_unload, 0, 1); // Alundaio
+#if defined(USE_DX11) && defined(XR_DLSS)
+    CMD4(CCC_Integer, "r__dlss", &ps_r__dlss, 0, 1);
+    CMD4(CCC_Integer, "r__dlss_preset", &ps_r__dlss_preset, 0, 15);
+    CMD4(CCC_Integer, "r__dlss_jitter", &ps_r__dlss_jitter, 0, 1);
+    CMD4(CCC_Integer, "r__dlss_jsign", &ps_r__dlss_jsign, 0, 3);
+#endif
 
     // R1
     CMD4(CCC_Float, "r1_ssa_lod_a", &ps_r1_ssaLOD_A, 16, 96);

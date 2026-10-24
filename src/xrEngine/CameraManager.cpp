@@ -332,6 +332,11 @@ void CCameraManager::ApplyDevice()
     Device.mProject._31 = -m_cam_info.offsetX;
     Device.mProject._32 = -m_cam_info.offsetY;
 
+    // Sub-pixel jitter for temporal anti-aliasing / DLSS
+    Device.mProjectJitterApplied = Device.mProjectJitter;
+    Device.mProject._31 += Device.mProjectJitterApplied.x;
+    Device.mProject._32 += Device.mProjectJitterApplied.y;
+
     if (g_pGamePersistent && g_pGamePersistent->m_pMainMenu->IsActive())
         ResetPP();
     else

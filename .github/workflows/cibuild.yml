@@ -33,6 +33,14 @@ jobs:
       working-directory: src
       run: msbuild /m /p:Configuration="${{ matrix.Configuration }}" /p:Platform="${{ matrix.Platform }}" engine.sln
 
+    - name: Fetch DLSS runtime (nvngx_dlss.dll)
+      if: matrix.Platform == 'x64'
+      shell: pwsh
+      run: |
+        git clone --depth 1 --filter=blob:none --sparse https://github.com/NVIDIA/DLSS "$env:RUNNER_TEMP\dlss"
+        git -C "$env:RUNNER_TEMP\dlss" sparse-checkout set lib/Windows_x86_64/rel
+        Copy-Item "$env:RUNNER_TEMP\dlss\lib\Windows_x86_64\rel\nvngx_dlss.dll" "bin\x64\${{ matrix.Configuration }}\"
+
     - name: Prepare artifacts
       shell: cmd
       run: misc/windows/xr_pack_build.cmd "${{ matrix.Configuration }}" "${{ matrix.Platform }}"

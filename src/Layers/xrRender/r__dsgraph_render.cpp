@@ -172,6 +172,9 @@ public:
         Fmatrix prj_new;
         prj_new.build_projection(deg2rad(psHUD_FOV * Device.fFOV /* *Device.fASPECT*/), Device.fASPECT,
             HUD_VIEWPORT_NEAR, g_pGamePersistent->Environment().CurrentEnv.far_plane);
+        // same sub-pixel jitter as the world projection (DLSS)
+        prj_new._31 += Device.mProjectJitterApplied.x;
+        prj_new._32 += Device.mProjectJitterApplied.y;
         cmd_list.set_xform_project(prj_new);
 
         RImplementation.rmNear(cmd_list);

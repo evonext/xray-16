@@ -2,6 +2,7 @@
 #include "xrEngine/IGame_Persistent.h"
 #include "xrEngine/Environment.h"
 #include "Layers/xrRender/dxEnvironmentRender.h"
+#include "Layers/xrRenderDX11/dx11DLSS.h"
 
 #define STENCIL_CULL 0
 
@@ -17,6 +18,13 @@ void CRenderTarget::phase_combine()
 
     //	TODO: DX11: Remove half pixel offset
     bool _menu_pp = g_pGamePersistent ? g_pGamePersistent->OnRenderPPUI_query() : false;
+
+#if defined(XR_DLSS)
+    // DLSS replaces the engine's edge AA and motion blur
+    const bool dlss_on = !_menu_pp && !RImplementation.o.msaa && dlss::Enabled(HW.pDevice);
+#else
+    constexpr bool dlss_on = false;
+#endif
 
     u32 Offset = 0;
     Fvector2 p0, p1;
@@ -95,7 +103,7 @@ void CRenderTarget::phase_combine()
         m_previous.mul(m_saved_viewproj, Device.mInvView);
         m_current.set(Device.mProject);
         m_saved_viewproj.set(Device.mFullTransform);
-        float scale = ps_r2_mblur / 2.f;
+        float scale = dlss_on ? 0.f : ps_r2_mblur / 2.f;
         m_blur_scale.set(scale, -scale).div(12.f);
     }
 
@@ -381,7 +389,7 @@ void CRenderTarget::phase_combine()
         // Draw COLOR
         if (!RImplementation.o.msaa)
         {
-            if (ps_r2_ls_flags.test(R2FLAG_AA))
+            if (ps_r2_ls_flags.test(R2FLAG_AA) && !dlss_on)
                 RCache.set_Element(s_combine->E[bDistort ? 3 : 1]); // look at blender_combine.cpp
             else
                 RCache.set_Element(s_combine->E[bDistort ? 4 : 2]); // look at blender_combine.cpp
@@ -414,6 +422,42 @@ void CRenderTarget::phase_combine()
     /* if (!RImplementation.o.fp16_blend)*/
     PIX_EVENT(LENS_FLARES);
     g_pGamePersistent->Environment().RenderFlares(); // lens-flares
+
+#if defined(XR_DLSS)
+    // DLSS (DLAA): scene color is in rt_Color here, HUD-less UI and post-process come after
+    if (dlss_on)
+    {
+        PIX_EVENT(DLSS);
+        dlss::FrameInputs in{};
+        in.ctx = HW.get_context(CHW::IMM_CTX_ID);
+        in.color = rt_Color->pSurface;
+        in.depth = rt_Base_Depth->pSurface;
+        D3D11_TEXTURE2D_DESC color_desc;
+        in.color->GetDesc(&color_desc);
+        in.width = color_desc.Width;
+        in.height = color_desc.Height;
+        in.view = Device.mView;
+        in.projUnjittered = Device.mProject;
+        in.projUnjittered._31 -= Device.mProjectJitterApplied.x;
+        in.projUnjittered._32 -= Device.mProjectJitterApplied.y;
+        in.jitterNdc = Device.mProjectJitterApplied;
+        in.jitterPx.set(Device.mProjectJitterApplied.x * float(in.width) * 0.5f,
+            -Device.mProjectJitterApplied.y * float(in.height) * 0.5f);
+        dlss::Evaluate(HW.pDevice, HW.pContext1, in);
+    }
+    {
+        Fvector2 jitter_px, jitter_ndc;
+        if (dlss_on)
+        {
+            D3D11_TEXTURE2D_DESC color_desc;
+            rt_Color->pSurface->GetDesc(&color_desc);
+            dlss::NextJitter(color_desc.Width, color_desc.Height, jitter_px, jitter_ndc);
+        }
+        else
+            jitter_ndc.set(0.f, 0.f);
+        Device.mProjectJitter = jitter_ndc;
+    }
+#endif
 
     //	PP-if required
     if (PP_Complex)
