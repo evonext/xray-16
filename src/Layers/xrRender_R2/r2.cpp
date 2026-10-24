@@ -519,6 +519,11 @@ void CRender::create()
 #if defined(USE_DX11)
     FluidManager.Initialize(70, 70, 70);
     //	FluidManager.Initialize( 100, 100, 100 );
+#if defined(XR_DLSS)
+    if (Target && Target->dlss_scaled)
+        FluidManager.SetScreenSize(Target->scene_w, Target->scene_h);
+    else
+#endif
     FluidManager.SetScreenSize(Device.dwWidth, Device.dwHeight);
 #endif
 }
@@ -604,6 +609,11 @@ void CRender::reset_end()
     //-AVO
 
 #if defined(USE_DX11)
+#if defined(XR_DLSS)
+    if (Target && Target->dlss_scaled)
+        FluidManager.SetScreenSize(Target->scene_w, Target->scene_h);
+    else
+#endif
     FluidManager.SetScreenSize(Device.dwWidth, Device.dwHeight);
 #endif
 

@@ -431,7 +431,9 @@ void CRenderTarget::phase_combine()
     g_pGamePersistent->Environment().RenderFlares(); // lens-flares
 
 #if defined(XR_DLSS)
-    // DLSS (DLAA): scene color is in rt_Color here, HUD-less UI and post-process come after
+    // DLSS: scene color is in rt_Color here; post-process and UI come after
+    bool dlss_redirected = false;
+    bool dlss_done = false;
     if (dlss_on)
     {
         PIX_EVENT(DLSS);
@@ -443,6 +445,9 @@ void CRenderTarget::phase_combine()
         in.color->GetDesc(&color_desc);
         in.width = color_desc.Width;
         in.height = color_desc.Height;
+        in.output = dlss_scaled ? rt_DLSS_Out->pSurface : nullptr;
+        in.outWidth = dlss_scaled ? rt_DLSS_Out->dwWidth : in.width;
+        in.outHeight = dlss_scaled ? rt_DLSS_Out->dwHeight : in.height;
         in.view = Device.mView;
         in.projUnjittered = Device.mProject;
         in.projUnjittered._31 -= Device.mProjectJitterApplied.x;
@@ -450,7 +455,7 @@ void CRenderTarget::phase_combine()
         in.jitterNdc = Device.mProjectJitterApplied;
         in.jitterPx.set(Device.mProjectJitterApplied.x * float(in.width) * 0.5f,
             -Device.mProjectJitterApplied.y * float(in.height) * 0.5f);
-        dlss::Evaluate(HW.pDevice, HW.pContext1, in);
+        dlss_done = dlss::Evaluate(HW.pDevice, HW.pContext1, in);
     }
     {
         Fvector2 jitter_px, jitter_ndc;
@@ -458,11 +463,26 @@ void CRenderTarget::phase_combine()
         {
             D3D11_TEXTURE2D_DESC color_desc;
             rt_Color->pSurface->GetDesc(&color_desc);
-            dlss::NextJitter(color_desc.Width, color_desc.Height, jitter_px, jitter_ndc);
+            dlss::NextJitter(color_desc.Width, color_desc.Height,
+                dlss_scaled ? rt_DLSS_Out->dwWidth : color_desc.Width, jitter_px, jitter_ndc);
         }
         else
             jitter_ndc.set(0.f, 0.f);
         Device.mProjectJitter = jitter_ndc;
+    }
+
+    if (dlss_scaled)
+    {
+        // back to output resolution for post-process / UI
+        dlss_end_scene();
+        // post-process samples "$user$albedo" (rt_Color): point it at the upscaled image.
+        // If DLSS failed this frame, PP simply stretches the low-res scene.
+        if (dlss_done)
+        {
+            rt_Color->pTexture->surface_set(rt_DLSS_Out->pSurface);
+            RCache.Invalidate();
+            dlss_redirected = true;
+        }
     }
 #endif
 
@@ -472,6 +492,14 @@ void CRenderTarget::phase_combine()
         PIX_EVENT(phase_pp);
         phase_pp();
     }
+
+#if defined(XR_DLSS)
+    if (dlss_redirected)
+    {
+        rt_Color->pTexture->surface_set(rt_Color->pSurface);
+        RCache.Invalidate();
+    }
+#endif
 
     //	Re-adapt luminance
     RCache.set_Stencil(FALSE);

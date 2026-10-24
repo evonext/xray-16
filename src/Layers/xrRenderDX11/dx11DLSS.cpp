@@ -6,6 +6,8 @@
 #include "dx11DLSS.h"
 #include "Layers/xrRender/xrRender_console.h"
 
+#include <algorithm>
+
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
 #include <nvsdk_ngx_helpers_d3d.h>
@@ -23,8 +25,26 @@ bool g_init_tried = false;
 bool g_available = false;
 NVSDK_NGX_Parameter* g_params = nullptr;
 NVSDK_NGX_Handle* g_feature = nullptr;
-u32 g_feat_w = 0, g_feat_h = 0;
+u32 g_feat_w = 0, g_feat_h = 0, g_feat_ow = 0, g_feat_oh = 0;
 int g_feat_preset = -1;
+int g_feat_mode = -1;
+
+u32 g_saved_w = 0, g_saved_h = 0;
+bool g_render_res = false;
+
+NVSDK_NGX_PerfQuality_Value mode_to_pq(int mode)
+{
+    switch (mode)
+    {
+    case 1: return NVSDK_NGX_PerfQuality_Value_MaxQuality;
+    case 2: return NVSDK_NGX_PerfQuality_Value_Balanced;
+    case 3: return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+    case 4: return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+    default: return NVSDK_NGX_PerfQuality_Value_DLAA;
+    }
+}
+
+constexpr const char* MODE_NAMES[] = { "DLAA", "Quality", "Balanced", "Performance", "Ultra Performance" };
 
 ID3D11Texture2D* g_mv = nullptr; // R16G16_FLOAT motion vectors (pixels, current -> previous)
 ID3D11UnorderedAccessView* g_mv_uav = nullptr;
@@ -245,8 +265,9 @@ void release_feature()
         NVSDK_NGX_D3D11_ReleaseFeature(g_feature);
         g_feature = nullptr;
     }
-    g_feat_w = g_feat_h = 0;
+    g_feat_w = g_feat_h = g_feat_ow = g_feat_oh = 0;
     g_feat_preset = -1;
+    g_feat_mode = -1;
 }
 
 bool ensure_textures(ID3D11Device* device, const FrameInputs& in)
@@ -254,7 +275,8 @@ bool ensure_textures(ID3D11Device* device, const FrameInputs& in)
     D3D11_TEXTURE2D_DESC cd;
     in.color->GetDesc(&cd);
 
-    if (g_tex_w != in.width || g_tex_h != in.height || g_out_fmt != cd.Format)
+    const bool need_out = in.output == nullptr;
+    if (g_tex_w != in.width || g_tex_h != in.height || g_out_fmt != cd.Format || need_out != (g_out != nullptr))
     {
         release_textures();
 
@@ -277,11 +299,14 @@ bool ensure_textures(ID3D11Device* device, const FrameInputs& in)
             FAILED(device->CreateUnorderedAccessView(g_zout, nullptr, &g_zout_uav)))
             return false;
 
-        d.Format = cd.Format;
-        if (FAILED(device->CreateTexture2D(&d, nullptr, &g_out)))
+        if (need_out)
         {
-            Msg("! [DLSS] cannot create UAV output texture of format %u", cd.Format);
-            return false;
+            d.Format = cd.Format;
+            if (FAILED(device->CreateTexture2D(&d, nullptr, &g_out)))
+            {
+                Msg("! [DLSS] cannot create UAV output texture of format %u", cd.Format);
+                return false;
+            }
         }
 
         g_tex_w = in.width;
@@ -311,20 +336,25 @@ bool ensure_textures(ID3D11Device* device, const FrameInputs& in)
 bool ensure_feature(ID3D11DeviceContext* ctx, const FrameInputs& in)
 {
     const int preset = ps_r__dlss_preset;
-    if (g_feature && g_feat_w == in.width && g_feat_h == in.height && g_feat_preset == preset)
+    const int mode = (in.outWidth == in.width && in.outHeight == in.height) ? 0 : ps_r__dlss_mode;
+    if (g_feature && g_feat_w == in.width && g_feat_h == in.height && g_feat_ow == in.outWidth &&
+        g_feat_oh == in.outHeight && g_feat_preset == preset && g_feat_mode == mode)
         return true;
 
     release_feature();
 
     NVSDK_NGX_Parameter_SetUI(g_params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, unsigned(preset));
     NVSDK_NGX_Parameter_SetUI(g_params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, unsigned(preset));
+    NVSDK_NGX_Parameter_SetUI(g_params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, unsigned(preset));
+    NVSDK_NGX_Parameter_SetUI(g_params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, unsigned(preset));
+    NVSDK_NGX_Parameter_SetUI(g_params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, unsigned(preset));
 
     NVSDK_NGX_DLSS_Create_Params cp{};
     cp.Feature.InWidth = in.width;
     cp.Feature.InHeight = in.height;
-    cp.Feature.InTargetWidth = in.width;
-    cp.Feature.InTargetHeight = in.height;
-    cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+    cp.Feature.InTargetWidth = in.outWidth;
+    cp.Feature.InTargetHeight = in.outHeight;
+    cp.Feature.InPerfQualityValue = mode_to_pq(mode);
     cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes; // LDR input, MVs not jittered, depth not inverted
 
     const NVSDK_NGX_Result r = NGX_D3D11_CREATE_DLSS_EXT(ctx, &g_feature, g_params, &cp);
@@ -336,9 +366,13 @@ bool ensure_feature(ID3D11DeviceContext* ctx, const FrameInputs& in)
     }
     g_feat_w = in.width;
     g_feat_h = in.height;
+    g_feat_ow = in.outWidth;
+    g_feat_oh = in.outHeight;
     g_feat_preset = preset;
+    g_feat_mode = mode;
     g_have_prev = false;
-    Msg("* [DLSS] DLAA feature created %ux%u, preset %d", in.width, in.height, preset);
+    Msg("* [DLSS] %s feature created: render %ux%u -> output %ux%u, preset %d", MODE_NAMES[mode], in.width,
+        in.height, in.outWidth, in.outHeight, preset);
     return true;
 }
 } // namespace
@@ -350,7 +384,7 @@ bool Enabled(ID3D11Device* device)
     return try_init(device);
 }
 
-void NextJitter(u32 width, u32 height, Fvector2& outPx, Fvector2& outNdc)
+void NextJitter(u32 width, u32 height, u32 outWidth, Fvector2& outPx, Fvector2& outNdc)
 {
     if (!ps_r__dlss || !g_available || !ps_r__dlss_jitter || !width || !height)
     {
@@ -358,7 +392,9 @@ void NextJitter(u32 width, u32 height, Fvector2& outPx, Fvector2& outNdc)
         outNdc.set(0.f, 0.f);
         return;
     }
-    constexpr u32 phases = 16;
+    // NVIDIA recommendation: 8 * (output / render)^2 phases, at least 16 for DLAA
+    const float ratio = width ? float(outWidth) / float(width) : 1.f;
+    const u32 phases = std::clamp(u32(8.f * ratio * ratio + 0.5f), 16u, 72u);
     g_jitter_index = (g_jitter_index + 1) % phases;
     outPx.x = halton(g_jitter_index + 1, 2) - 0.5f;
     outPx.y = halton(g_jitter_index + 1, 3) - 0.5f;
@@ -369,7 +405,7 @@ void NextJitter(u32 width, u32 height, Fvector2& outPx, Fvector2& outNdc)
 
 bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInputs& in)
 {
-    if (!g_available || !ctx1 || !in.color || !in.depth || !in.width || !in.height)
+    if (!g_available || !ctx1 || !in.color || !in.depth || !in.width || !in.height || !in.outWidth || !in.outHeight)
         return false;
     if (!ensure_textures(device, in))
     {
@@ -429,7 +465,7 @@ bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInput
 
         NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
         ep.Feature.pInColor = in.color;
-        ep.Feature.pInOutput = g_out;
+        ep.Feature.pInOutput = in.output ? in.output : g_out;
         ep.pInDepth = g_zout;
         ep.pInMotionVectors = g_mv;
         ep.InJitterOffsetX = sx * in.jitterPx.x;
@@ -451,7 +487,8 @@ bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInput
             break;
         }
 
-        ctx1->CopyResource(in.color, g_out);
+        if (!in.output)
+            ctx1->CopyResource(in.color, g_out);
         ok = true;
     } while (false);
 
@@ -463,6 +500,54 @@ bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInput
     g_have_prev = true;
     return ok;
 }
+
+bool GetRenderSize(ID3D11Device* device, u32 outW, u32 outH, u32& rw, u32& rh)
+{
+    rw = outW;
+    rh = outH;
+    const int mode = ps_r__dlss_mode;
+    if (!ps_r__dlss || mode <= 0 || mode > 4 || !try_init(device))
+        return false;
+
+    unsigned int ow = 0, oh = 0, maxw = 0, maxh = 0, minw = 0, minh = 0;
+    float sharpness = 0.f;
+    const NVSDK_NGX_Result r = NGX_DLSS_GET_OPTIMAL_SETTINGS(
+        g_params, outW, outH, mode_to_pq(mode), &ow, &oh, &maxw, &maxh, &minw, &minh, &sharpness);
+    if (NVSDK_NGX_FAILED(r) || !ow || !oh)
+    {
+        // fallback ratios
+        constexpr float scales[] = { 1.f, 0.667f, 0.58f, 0.5f, 0.333f };
+        ow = u32(float(outW) * scales[mode]);
+        oh = u32(float(outH) * scales[mode]);
+        Msg("! [DLSS] GetOptimalSettings failed (0x%08x), using %ux%u", r, ow, oh);
+    }
+    rw = ow;
+    rh = oh;
+    Msg("* [DLSS] %s: render %ux%u -> output %ux%u", MODE_NAMES[mode], rw, rh, outW, outH);
+    return rw != outW || rh != outH;
+}
+
+void BeginRenderRes(u32 rw, u32 rh)
+{
+    if (g_render_res)
+        return;
+    g_saved_w = Device.dwWidth;
+    g_saved_h = Device.dwHeight;
+    Device.dwWidth = rw;
+    Device.dwHeight = rh;
+    g_render_res = true;
+}
+
+void EndRenderRes()
+{
+    if (!g_render_res)
+        return;
+    Device.dwWidth = g_saved_w;
+    Device.dwHeight = g_saved_h;
+    g_render_res = false;
+}
+
+bool InRenderRes() { return g_render_res; }
 
 void Shutdown(ID3D11Device* device)
 {

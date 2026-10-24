@@ -67,6 +67,7 @@ extern ECORE_API int ps_r__clear_models_on_unload;
 // NVIDIA DLSS (R4 only)
 extern ECORE_API int ps_r__dlss;
 extern ECORE_API int ps_r__dlss_preset;
+extern ECORE_API int ps_r__dlss_mode;
 extern ECORE_API int ps_r__dlss_jitter;
 extern ECORE_API int ps_r__dlss_jsign;
 

@@ -153,6 +153,7 @@ int ps_r__clear_models_on_unload = 0; // Alundaio
 
 int ps_r__dlss = 0;
 int ps_r__dlss_preset = 0;
+int ps_r__dlss_mode = 0;
 int ps_r__dlss_jitter = 1;
 int ps_r__dlss_jsign = 0;
 
@@ -779,6 +780,7 @@ void xrRender_initconsole()
 #if defined(USE_DX11) && defined(XR_DLSS)
     CMD4(CCC_Integer, "r__dlss", &ps_r__dlss, 0, 1);
     CMD4(CCC_Integer, "r__dlss_preset", &ps_r__dlss_preset, 0, 15);
+    CMD4(CCC_Integer, "r__dlss_mode", &ps_r__dlss_mode, 0, 4);
     CMD4(CCC_Integer, "r__dlss_jitter", &ps_r__dlss_jitter, 0, 1);
     CMD4(CCC_Integer, "r__dlss_jsign", &ps_r__dlss_jsign, 0, 3);
 #endif

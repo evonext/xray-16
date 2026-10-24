@@ -1,4 +1,7 @@
 #include "stdafx.h"
+#if defined(XR_DLSS)
+#include "Layers/xrRenderDX11/dx11DLSS.h"
+#endif
 #include "Layers/xrRender/ResourceManager.h"
 #include "Layers/xrRender/blenders/blender_light_occq.h"
 #include "Layers/xrRender/blenders/blender_light_mask.h"
@@ -265,6 +268,25 @@ CRenderTarget::CRenderTarget()
         }
         rt_Base_Depth.create(r2_RT_base_depth, w, h, HW.Caps.fDepth, 1, { CRT::CreateBase });
 
+#if defined(XR_DLSS)
+        scene_w = w;
+        scene_h = h;
+        dlss_scaled = !options.msaa && dlss::GetRenderSize(HW.pDevice, w, h, scene_w, scene_h);
+        if (dlss_scaled)
+        {
+            rt_Base_Depth_full = rt_Base_Depth;
+            rt_Generic_0_full.create("$user$dlss_generic0_full", w, h, D3DFMT_A8R8G8B8, 1);
+            rt_Generic_1_full.create("$user$dlss_generic1_full", w, h, D3DFMT_A8R8G8B8, 1);
+            rt_Base_Depth_scene.create("$user$dlss_scene_depth", scene_w, scene_h, D3DFMT_D24S8, 1);
+            rt_Base_Depth = rt_Base_Depth_scene;
+            // everything below (and all scene passes) works at the render resolution
+            w = scene_w;
+            h = scene_h;
+            dlss::BeginRenderRes(scene_w, scene_h);
+            dlss_in_scene = true;
+        }
+#endif
+
         if (!options.msaa)
             rt_MSAADepth = rt_Base_Depth;
         else
@@ -314,6 +336,11 @@ CRenderTarget::CRenderTarget()
         rt_Generic.create(r2_RT_generic, w, h, D3DFMT_A8R8G8B8, 1);
 #ifdef XR_PLATFORM_WEB
         rt_Forward.create("$user$forward", w, h, D3DFMT_A8R8G8B8, 1);
+#if defined(XR_DLSS)
+        if (dlss_scaled)
+            rt_DLSS_Out.create("$user$dlss_out", rt_Base_Depth_full->dwWidth, rt_Base_Depth_full->dwHeight,
+                rt_Color->fmt, 1, 1, { CRT::CreateUAV });
+#endif
 #endif
 
         if (!options.msaa)
@@ -701,10 +728,67 @@ CRenderTarget::CRenderTarget()
     g_flip.create(FVF::F_TL, RImplementation.Vertex.Buffer(), RImplementation.QuadIB);
 #endif
 
+#if defined(XR_DLSS)
+    dlss_end_scene();
+#endif
+
     //
     dwWidth[RCache.context_id] = Device.dwWidth;
     dwHeight[RCache.context_id] = Device.dwHeight;
 }
+
+#if defined(XR_DLSS)
+void CRenderTarget::dlss_begin_scene()
+{
+    if (!dlss_scaled || dlss_in_scene)
+        return;
+    rt_Base_Depth = rt_Base_Depth_scene;
+    dlss::BeginRenderRes(scene_w, scene_h);
+    dlss_in_scene = true;
+    // D3D11 viewport is not derived from the bound target: keep it equal to the scene size
+    dwWidth[RCache.context_id] = scene_w;
+    dwHeight[RCache.context_id] = scene_h;
+    RCache.SetViewport({ 0.f, 0.f, float(scene_w), float(scene_h), 0.f, 1.f });
+}
+
+void CRenderTarget::dlss_end_scene()
+{
+    if (!dlss_scaled || !dlss_in_scene)
+        return;
+    rt_Base_Depth = rt_Base_Depth_full;
+    dlss::EndRenderRes();
+    dlss_in_scene = false;
+    dwWidth[RCache.context_id] = Device.dwWidth;
+    dwHeight[RCache.context_id] = Device.dwHeight;
+    RCache.SetViewport({ 0.f, 0.f, float(Device.dwWidth), float(Device.dwHeight), 0.f, 1.f });
+}
+
+// Main menu over a running level draws UI into generic0/1 and shows them full screen:
+// use output-resolution surfaces for that, keeping the "$user$generic0/1" names the menu shader samples.
+void CRenderTarget::dlss_begin_menu()
+{
+    if (!dlss_scaled || dlss_in_menu)
+        return;
+    rt_Generic_0->pTexture->surface_set(rt_Generic_0_full->pSurface);
+    rt_Generic_1->pTexture->surface_set(rt_Generic_1_full->pSurface);
+    std::swap(rt_Generic_0, rt_Generic_0_full);
+    std::swap(rt_Generic_1, rt_Generic_1_full);
+    RCache.Invalidate();
+    dlss_in_menu = true;
+}
+
+void CRenderTarget::dlss_end_menu()
+{
+    if (!dlss_in_menu)
+        return;
+    std::swap(rt_Generic_0, rt_Generic_0_full);
+    std::swap(rt_Generic_1, rt_Generic_1_full);
+    rt_Generic_0->pTexture->surface_set(rt_Generic_0->pSurface);
+    rt_Generic_1->pTexture->surface_set(rt_Generic_1->pSurface);
+    RCache.Invalidate();
+    dlss_in_menu = false;
+}
+#endif
 
 CRenderTarget::~CRenderTarget()
 {

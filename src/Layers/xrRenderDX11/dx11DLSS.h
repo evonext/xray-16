@@ -1,11 +1,13 @@
 #pragma once
 
 // NVIDIA DLSS (NGX, D3D11) integration for the R4 renderer.
-// Phase 1: DLAA (native resolution anti-aliasing) with camera motion vectors
-// reconstructed from the depth buffer.
+// DLAA (native resolution) and DLSS Super Resolution (scene rendered at lower resolution,
+// upscaled before post-process and UI). Camera motion vectors are reconstructed from depth.
 //
 // Console:
-//   r__dlss            0/1      enable DLSS (DLAA)
+//   r__dlss            0/1      enable DLSS
+//   r__dlss_mode       0..4     0 = DLAA, 1 = Quality, 2 = Balanced, 3 = Performance, 4 = Ultra Performance
+//                               (changing mode requires vid_restart)
 //   r__dlss_preset     0..15    0 = driver default, 10 = J, 11 = K (transformer)
 //   r__dlss_jitter     0/1      projection jitter (keep 1, 0 only for debugging)
 //   r__dlss_jsign      0..3     bit0 flips X jitter sign, bit1 flips Y (debug)
@@ -17,9 +19,11 @@ namespace dlss
 struct FrameInputs
 {
     ID3D11DeviceContext* ctx;
-    ID3D11Texture2D* color; // scene color, read and overwritten (in-place result)
-    ID3D11Texture2D* depth; // R24G8_TYPELESS hardware depth
-    u32 width, height;
+    ID3D11Texture2D* color; // scene color (render resolution)
+    ID3D11Texture2D* depth; // R24G8_TYPELESS hardware depth (render resolution)
+    ID3D11Texture2D* output; // upscaled result (output resolution); nullptr = in place into color (DLAA)
+    u32 width, height; // render resolution
+    u32 outWidth, outHeight; // output resolution
     Fmatrix view; // current view
     Fmatrix projUnjittered; // current projection without jitter
     Fvector2 jitterPx; // jitter used this frame, pixels
@@ -33,7 +37,18 @@ bool Enabled(ID3D11Device* device);
 bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInputs& in);
 
 // Computes jitter for the next frame (pixels and NDC). Zero if disabled.
-void NextJitter(u32 width, u32 height, Fvector2& outPx, Fvector2& outNdc);
+// width/height = render resolution, outWidth = output width (affects the number of jitter phases).
+void NextJitter(u32 width, u32 height, u32 outWidth, Fvector2& outPx, Fvector2& outNdc);
+
+// Render resolution for the current r__dlss_mode. Returns false when no upscaling is needed
+// (DLSS off/unavailable or DLAA mode): then rw/rh = outW/outH.
+bool GetRenderSize(ID3D11Device* device, u32 outW, u32 outH, u32& rw, u32& rh);
+
+// Temporarily makes Device.dwWidth/dwHeight report the render resolution, so the whole
+// scene pipeline (viewports, screen_res constants, effects) works at the lower resolution.
+void BeginRenderRes(u32 rw, u32 rh);
+void EndRenderRes();
+bool InRenderRes();
 
 void Shutdown(ID3D11Device* device);
 } // namespace dlss

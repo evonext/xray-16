@@ -16,6 +16,14 @@ void CRender::RenderMenu()
     TracyD3D11Zone(HW.profiler_ctx, "render_menu");
 #endif
     PIX_EVENT(render_menu);
+#if defined(XR_DLSS)
+    struct dlss_menu_scope
+    {
+        CRenderTarget* t;
+        explicit dlss_menu_scope(CRenderTarget* target) : t(target) { t->dlss_begin_menu(); }
+        ~dlss_menu_scope() { t->dlss_end_menu(); }
+    } dlss_scope(Target);
+#endif
     //	Globals
     RCache.set_CullMode(CULL_CCW);
     RCache.set_Stencil(FALSE);
@@ -103,6 +111,17 @@ void CRender::Render()
         m_bFirstFrameAfterReset = false;
         return;
     }
+
+#if defined(XR_DLSS)
+    // DLSS upscaling: the scene below renders at the lower resolution; phase_combine ends the scope
+    // right after DLSS (post-process runs at output resolution). The guard covers early exits.
+    struct dlss_scene_scope
+    {
+        CRenderTarget* t;
+        explicit dlss_scene_scope(CRenderTarget* target) : t(target) { t->dlss_begin_scene(); }
+        ~dlss_scene_scope() { t->dlss_end_scene(); }
+    } dlss_scope(Target);
+#endif
 
     //.	VERIFY					(g_pGameLevel && g_pGameLevel->pHUD);
     auto& dsgraph = get_imm_context();

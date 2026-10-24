@@ -47,6 +47,22 @@ public:
     xr_vector<ref_rt> rt_Base;
     ref_rt rt_Base_Depth;
 
+#if defined(XR_DLSS)
+    // DLSS Super Resolution: scene is rendered at scene_w x scene_h, then upscaled to the output.
+    bool dlss_scaled{};
+    bool dlss_in_scene{};
+    bool dlss_in_menu{};
+    u32 scene_w{}, scene_h{};
+    ref_rt rt_Base_Depth_full; // output-resolution depth (UI, post-process)
+    ref_rt rt_Base_Depth_scene; // render-resolution depth (scene)
+    ref_rt rt_DLSS_Out; // upscaled color, read by post-process instead of rt_Color
+    ref_rt rt_Generic_0_full, rt_Generic_1_full; // output-resolution targets for the main menu over a level
+    void dlss_begin_scene();
+    void dlss_end_scene();
+    void dlss_begin_menu();
+    void dlss_end_menu();
+#endif
+
     // MRT-path
     ref_rt rt_Depth; // Z-buffer like - initial depth
     ref_rt rt_MSAADepth; // z-buffer for MSAA deferred shading. If MSAA is disabled, points to rt_Base_Depth so we can reduce branching
