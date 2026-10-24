@@ -11,12 +11,12 @@ jobs:
   windows:
     name: Windows ${{ matrix.Configuration }} ${{ matrix.Platform }} (msvc)
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        Configuration: [Debug, Mixed, Release, Release Master Gold]
-        Platform: [x64, x86]
+        Configuration: [Release]
+        Platform: [x64]
     steps:
     - uses: actions/checkout@main
       with:
@@ -69,6 +69,7 @@ jobs:
       run: gh release upload --clobber latest-nightly (get-item res/*.*.7z)
 
   cmake:
+    if: false  # fork: only Windows build needed for DLSS work
     name: ${{ matrix.platform.name }} ${{ matrix.configuration }} ${{ matrix.platform.arch }} (${{ matrix.platform.cc || 'unknown compiler' }})
     runs-on: ${{ matrix.platform.os }}
 
@@ -218,6 +219,7 @@ jobs:
         path: build/artifacts/openxray*.*
 
   bsd:
+    if: false  # fork: only Windows build needed for DLSS work
     name: ${{ matrix.platform.name }} ${{ matrix.configuration }} ${{ matrix.platform.arch }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -289,6 +291,7 @@ jobs:
         run: cmake --build build --config ${{ matrix.Configuration }} --parallel 4
 
   flatpak:
+    if: false  # fork: only Windows build needed for DLSS work
     name: Flatpak ${{ matrix.platform.arch }}
     runs-on: ${{ matrix.platform.os }}
 
