@@ -7,6 +7,7 @@
 #include "Layers/xrRender/xrRender_console.h"
 
 #include <atomic>
+#include <mutex>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -80,6 +81,61 @@ DXGI_FORMAT nr_color_fmt = DXGI_FORMAT_UNKNOWN;
 u32 nr_guide_w = 0, nr_guide_h = 0;
 u32 nr_res_w = 0, nr_res_h = 0;
 
+// D3D11 compute pass: color -> shared color with alpha forced to 1 (DLSS-NR expects an opaque input;
+// the engine keeps other data in the alpha channel)
+ID3D11ComputeShader* nr_opaque_cs = nullptr;
+ID3D11ShaderResourceView* nr_src_srv = nullptr;
+ID3D11Texture2D* nr_src_tex = nullptr; // not owned
+ID3D11UnorderedAccessView* nr_color_uav = nullptr;
+
+constexpr const char* NR_OPAQUE_CS = R"(
+Texture2D<float4> t_in : register(t0);
+RWTexture2D<float4> u_out : register(u0);
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    u_out[id.xy] = float4(t_in.Load(int3(id.xy, 0)).rgb, 1.0);
+}
+)";
+
+bool opaque_copy(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* src, ID3D11Texture2D* dst, u32 w, u32 h)
+{
+    if (!nr_opaque_cs)
+    {
+        ID3DBlob* blob = nullptr;
+        ID3DBlob* err = nullptr;
+        if (FAILED(D3DCompile(NR_OPAQUE_CS, xr_strlen(NR_OPAQUE_CS), "nr_opaque", nullptr, nullptr, "main", "cs_5_0", 0, 0, &blob, &err)))
+        {
+            if (err) err->Release();
+            return false;
+        }
+        if (err) err->Release();
+        dev->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &nr_opaque_cs);
+        blob->Release();
+        if (!nr_opaque_cs)
+            return false;
+    }
+    if (nr_src_tex != src)
+    {
+        if (nr_src_srv) { nr_src_srv->Release(); nr_src_srv = nullptr; }
+        if (FAILED(dev->CreateShaderResourceView(src, nullptr, &nr_src_srv)))
+            return false;
+        nr_src_tex = src;
+    }
+    if (!nr_color_uav && FAILED(dev->CreateUnorderedAccessView(dst, nullptr, &nr_color_uav)))
+        return false;
+    ctx->CSSetShader(nr_opaque_cs, nullptr, 0);
+    ctx->CSSetShaderResources(0, 1, &nr_src_srv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &nr_color_uav, nullptr);
+    ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    ID3D11ShaderResourceView* null_srv = nullptr;
+    ID3D11UnorderedAccessView* null_uav = nullptr;
+    ctx->CSSetShaderResources(0, 1, &null_srv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+    ctx->CSSetShader(nullptr, nullptr, 0);
+    return true;
+}
+
 std::wstring logs_dir_w()
 {
     string_path path;
@@ -111,6 +167,141 @@ void NVSDK_CONV nr_ngx_log(const char* message, NVSDK_NGX_Logging_Level, NVSDK_N
         if (*c == '\n' || *c == '\r')
             *c = ' ';
     Msg("- [NGX:%d] %s", int(feature), line);
+}
+
+// ---- GPU architecture spoof (same approach as NeuralScreen) ----
+// nvngx_dlssnr.dll asks nvapi for the GPU architecture and refuses anything below Blackwell, although the
+// runtime carries kernels for sm_86/89 as well. NvAPI_GPU_GetArchInfo is patched in this process only,
+// and only while DLSS-NR calls run (DLSS SR keeps seeing the real GPU).
+constexpr u32 NVAPI_ID_GPU_GETARCHINFO = 0xD8265D24;
+constexpr u32 NV_ARCH_BLACKWELL = 0x1B0;
+std::mutex arch_mutex;
+u8* arch_target = nullptr;
+u8 arch_saved[12] = {};
+u8 arch_patch[12] = {};
+bool arch_ready = false;
+int arch_depth = 0;
+
+int __cdecl arch_hook(void* gpu, u32* info);
+
+void arch_write(const u8* bytes)
+{
+    memcpy(arch_target, bytes, sizeof(arch_patch));
+    FlushInstructionCache(GetCurrentProcess(), arch_target, sizeof(arch_patch));
+}
+
+int __cdecl arch_hook(void* gpu, u32* info)
+{
+    std::lock_guard<std::mutex> lock(arch_mutex);
+    arch_write(arch_saved);
+    const int r = reinterpret_cast<int(__cdecl*)(void*, u32*)>(arch_target)(gpu, info);
+    arch_write(arch_patch);
+    if (r == 0 && info && info[1] < NV_ARCH_BLACKWELL) // NV_GPU_ARCH_INFO: version, architecture, ...
+        info[1] = NV_ARCH_BLACKWELL;
+    return r;
+}
+
+bool arch_init()
+{
+    if (arch_ready)
+        return true;
+    HMODULE nvapi = LoadLibraryW(L"nvapi64.dll");
+    if (!nvapi)
+        return false;
+    using qi_fn = void*(__cdecl*)(u32);
+    const auto qi = reinterpret_cast<qi_fn>(GetProcAddress(nvapi, "nvapi_QueryInterface"));
+    if (!qi)
+        return false;
+    arch_target = static_cast<u8*>(qi(NVAPI_ID_GPU_GETARCHINFO));
+    if (!arch_target)
+        return false;
+    DWORD old = 0;
+    if (!VirtualProtect(arch_target, sizeof(arch_patch), PAGE_EXECUTE_READWRITE, &old))
+        return false;
+    memcpy(arch_saved, arch_target, sizeof(arch_saved));
+    // mov rax, imm64 ; jmp rax
+    arch_patch[0] = 0x48;
+    arch_patch[1] = 0xB8;
+    const u64 addr = reinterpret_cast<u64>(&arch_hook);
+    memcpy(arch_patch + 2, &addr, 8);
+    arch_patch[10] = 0xFF;
+    arch_patch[11] = 0xE0;
+    arch_ready = true;
+    Msg("* [DLSS-NR] GPU architecture spoof ready (reports Blackwell to the DLSS-NR runtime only)");
+    return true;
+}
+
+struct ArchSpoofScope
+{
+    bool on = false;
+    ArchSpoofScope()
+    {
+        if (!ps_r__dlss_nr_arch_spoof || !arch_ready)
+            return;
+        std::lock_guard<std::mutex> lock(arch_mutex);
+        if (arch_depth++ == 0)
+            arch_write(arch_patch);
+        on = true;
+    }
+    ~ArchSpoofScope()
+    {
+        if (!on)
+            return;
+        std::lock_guard<std::mutex> lock(arch_mutex);
+        if (--arch_depth == 0)
+            arch_write(arch_saved);
+    }
+};
+
+// ---- direct runtime calls through the forwarder (bypasses NGX Core's snippet arch metadata check) ----
+using fwd_load_fn = int(__cdecl*)(const wchar_t*);
+using fwd_init_fn = int(__cdecl*)(unsigned long long, const wchar_t*, void*, int, const void*);
+using fwd_create_fn = int(__cdecl*)(void*, int, void*, void**);
+using fwd_eval_fn = int(__cdecl*)(void*, const void*, const void*, void*);
+using fwd_release_fn = int(__cdecl*)(void*);
+fwd_init_fn fwd_init = nullptr;
+fwd_create_fn fwd_create = nullptr;
+fwd_eval_fn fwd_eval = nullptr;
+fwd_release_fn fwd_release = nullptr;
+bool nr_direct = false;
+
+std::wstring exe_dir()
+{
+    wchar_t buf[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    std::wstring s(buf);
+    const size_t p = s.find_last_of(L"\\/");
+    return p == std::wstring::npos ? L"" : s.substr(0, p + 1);
+}
+
+bool init_direct(const std::wstring& logs)
+{
+    const std::wstring dir = exe_dir();
+    HMODULE fwd = LoadLibraryW((dir + L"nvngx.dll_xray-forwarder.dll").c_str());
+    if (!fwd)
+    {
+        Msg("! [DLSS-NR] forwarder nvngx.dll_xray-forwarder.dll not found, using NGX Core path");
+        return false;
+    }
+    const auto load = reinterpret_cast<fwd_load_fn>(GetProcAddress(fwd, "XrNrFwdLoad"));
+    fwd_init = reinterpret_cast<fwd_init_fn>(GetProcAddress(fwd, "XrNrFwdInitExt"));
+    fwd_create = reinterpret_cast<fwd_create_fn>(GetProcAddress(fwd, "XrNrFwdCreate"));
+    fwd_eval = reinterpret_cast<fwd_eval_fn>(GetProcAddress(fwd, "XrNrFwdEvaluate"));
+    fwd_release = reinterpret_cast<fwd_release_fn>(GetProcAddress(fwd, "XrNrFwdRelease"));
+    if (!load || !fwd_init || !fwd_create || !fwd_eval || !fwd_release)
+        return false;
+    if (!load((dir + L"nvngx_dlssnr.dll").c_str()))
+    {
+        Msg("! [DLSS-NR] nvngx_dlssnr.dll not found next to xrEngine.exe (or missing exports)");
+        return false;
+    }
+    int r;
+    {
+        ArchSpoofScope spoof;
+        r = fwd_init(0x1000000ull, logs.c_str(), nr_dev12, NVSDK_NGX_Version_API, g_nr_params);
+    }
+    Msg("%s [DLSS-NR] direct runtime Init_Ext -> 0x%08x", NVSDK_NGX_FAILED(NVSDK_NGX_Result(r)) ? "!" : "*", r);
+    return !NVSDK_NGX_FAILED(NVSDK_NGX_Result(r));
 }
 
 bool init_d3d12(ID3D11Device* device11, ID3D11DeviceContext* ctx11)
@@ -204,7 +395,13 @@ bool init_d3d12(ID3D11Device* device11, ID3D11DeviceContext* ctx11)
         Msg("! [DLSS-NR] NGX D3D12 GetCapabilityParameters failed: 0x%08x", r);
         return false;
     }
-    Msg("* [DLSS-NR] D3D12 interop device ready");
+    NVSDK_NGX_Parameter* own = nullptr;
+    if (NVSDK_NGX_SUCCEED(NVSDK_NGX_D3D12_AllocateParameters(&own)) && own)
+        g_nr_params = own; // our own block; capability block stays owned by NGX
+    if (ps_r__dlss_nr_arch_spoof && !arch_init())
+        Msg("! [DLSS-NR] GPU architecture spoof unavailable");
+    nr_direct = ps_r__dlss_nr_direct && init_direct(logs);
+    Msg("* [DLSS-NR] D3D12 interop device ready (%s)", nr_direct ? "direct runtime" : "NGX Core");
     return true;
 }
 
@@ -256,7 +453,10 @@ void release_nr_feature()
 {
     if (g_nr_feature)
     {
-        NVSDK_NGX_D3D12_ReleaseFeature(g_nr_feature);
+        if (nr_direct)
+            fwd_release(g_nr_feature);
+        else
+            NVSDK_NGX_D3D12_ReleaseFeature(g_nr_feature);
         g_nr_feature = nullptr;
     }
     g_nr_w = g_nr_h = 0;
@@ -286,7 +486,8 @@ bool ensure_resources(ID3D11Device* device11, u32 w, u32 h, DXGI_FORMAT color_fm
     nr_mvec.release();
     nr_depth.release();
 
-    if (!make_shared(device11, nr_color, w, h, color_fmt, false, "color") ||
+    if (nr_color_uav) { nr_color_uav->Release(); nr_color_uav = nullptr; }
+    if (!make_shared(device11, nr_color, w, h, color_fmt, true, "color") ||
         !make_shared(device11, nr_out, w, h, color_fmt, true, "output") ||
         !make_shared(device11, nr_mvec, gw, gh, DXGI_FORMAT_R16G16_FLOAT, false, "motion") ||
         !make_shared(device11, nr_depth, gw, gh, DXGI_FORMAT_R32_FLOAT, false, "depth"))
@@ -340,7 +541,12 @@ bool ensure_nr_feature(u32 w, u32 h)
     wait_cpu(nr_alloc_fence[slot]);
     nr_alloc[slot]->Reset();
     nr_list->Reset(nr_alloc[slot], nullptr);
-    const NVSDK_NGX_Result r = NVSDK_NGX_D3D12_CreateFeature(nr_list, NGX_FEATURE_DLSS_NR, g_nr_params, &g_nr_feature);
+    NVSDK_NGX_Result r;
+    {
+        ArchSpoofScope spoof;
+        r = nr_direct ? NVSDK_NGX_Result(fwd_create(nr_list, int(NGX_FEATURE_DLSS_NR), g_nr_params, reinterpret_cast<void**>(&g_nr_feature)))
+                      : NVSDK_NGX_D3D12_CreateFeature(nr_list, NGX_FEATURE_DLSS_NR, g_nr_params, &g_nr_feature);
+    }
     nr_list->Close();
     ID3D12CommandList* lists[] = { nr_list };
     nr_queue->ExecuteCommandLists(1, lists);
@@ -398,7 +604,8 @@ bool EvaluateNR(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D*
         return false;
 
     // D3D11 -> shared
-    ctx->CopyResource(nr_color.t11, color);
+    if (!opaque_copy(device, ctx, color, nr_color.t11, cd.Width, cd.Height))
+        ctx->CopyResource(nr_color.t11, color);
     ctx->CopyResource(nr_mvec.t11, mv);
     ctx->CopyResource(nr_depth.t11, depth);
     const u64 v_inputs = ++nr_fence_value;
@@ -450,7 +657,12 @@ bool EvaluateNR(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D*
     NVSDK_NGX_Parameter_SetI(g_nr_params, "DLSS.Indicator.Invert.Y.Axis", 0);
 
     nr_queue->Wait(nr_fence12, v_inputs);
-    const NVSDK_NGX_Result r = NVSDK_NGX_D3D12_EvaluateFeature(nr_list, g_nr_feature, g_nr_params, nullptr);
+    NVSDK_NGX_Result r;
+    {
+        ArchSpoofScope spoof;
+        r = nr_direct ? NVSDK_NGX_Result(fwd_eval(nr_list, g_nr_feature, g_nr_params, nullptr))
+                      : NVSDK_NGX_D3D12_EvaluateFeature(nr_list, g_nr_feature, g_nr_params, nullptr);
+    }
     nr_list->Close();
     ID3D12CommandList* lists[] = { nr_list };
     nr_queue->ExecuteCommandLists(1, lists);
@@ -483,6 +695,10 @@ void ShutdownNR()
     if (nr_queue && nr_fence12 && nr_fence_value)
         wait_cpu(nr_fence_value);
     release_nr_feature();
+    if (nr_color_uav) { nr_color_uav->Release(); nr_color_uav = nullptr; }
+    if (nr_src_srv) { nr_src_srv->Release(); nr_src_srv = nullptr; }
+    nr_src_tex = nullptr;
+    if (nr_opaque_cs) { nr_opaque_cs->Release(); nr_opaque_cs = nullptr; }
     nr_color.release();
     nr_out.release();
     nr_mvec.release();

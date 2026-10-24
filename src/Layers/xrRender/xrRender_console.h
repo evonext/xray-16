@@ -79,6 +79,8 @@ extern ECORE_API float ps_r__dlss_nr_skin_structure;
 extern ECORE_API int ps_r__dlss_nr_style;
 extern ECORE_API int ps_r__dlss_nr_automask;
 extern ECORE_API int ps_r__dlss_nr_ui_correction;
+extern ECORE_API int ps_r__dlss_nr_arch_spoof;
+extern ECORE_API int ps_r__dlss_nr_direct;
 extern ECORE_API int ps_r__dlss_jitter;
 extern ECORE_API int ps_r__dlss_jsign;
 

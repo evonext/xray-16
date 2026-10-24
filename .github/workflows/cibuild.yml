@@ -41,6 +41,14 @@ jobs:
         git -C "$env:RUNNER_TEMP\dlss" sparse-checkout set lib/Windows_x86_64/rel
         Copy-Item "$env:RUNNER_TEMP\dlss\lib\Windows_x86_64\rel\nvngx_dlss.dll" "bin\x64\${{ matrix.Configuration }}\"
 
+    - name: Build DLSS-NR forwarder
+      if: matrix.Platform == 'x64'
+      shell: cmd
+      run: |
+        for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VSDIR=%%i
+        call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
+        cl /nologo /Od /LD misc\dlss_nr_forwarder\forwarder.cpp /Fo:%RUNNER_TEMP%\ /Fe:"bin\x64\${{ matrix.Configuration }}\nvngx.dll_xray-forwarder.dll" /link /DLL /NOIMPLIB /NOEXP
+
     - name: Prepare artifacts
       shell: cmd
       run: misc/windows/xr_pack_build.cmd "${{ matrix.Configuration }}" "${{ matrix.Platform }}"

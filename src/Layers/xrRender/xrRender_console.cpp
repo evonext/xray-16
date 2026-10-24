@@ -166,6 +166,8 @@ float ps_r__dlss_nr_skin_structure = 1.16f;
 int ps_r__dlss_nr_style = 1;
 int ps_r__dlss_nr_automask = 1;
 int ps_r__dlss_nr_ui_correction = 0;
+int ps_r__dlss_nr_arch_spoof = 1;
+int ps_r__dlss_nr_direct = 1;
 int ps_r__dlss_jitter = 1;
 int ps_r__dlss_jsign = 0;
 
@@ -803,6 +805,8 @@ void xrRender_initconsole()
     CMD4(CCC_Integer, "r__dlss_nr_style", &ps_r__dlss_nr_style, 0, 15);
     CMD4(CCC_Integer, "r__dlss_nr_automask", &ps_r__dlss_nr_automask, 0, 1);
     CMD4(CCC_Integer, "r__dlss_nr_ui_correction", &ps_r__dlss_nr_ui_correction, 0, 1);
+    CMD4(CCC_Integer, "r__dlss_nr_arch_spoof", &ps_r__dlss_nr_arch_spoof, 0, 1);
+    CMD4(CCC_Integer, "r__dlss_nr_direct", &ps_r__dlss_nr_direct, 0, 1);
     CMD4(CCC_Integer, "r__dlss_jitter", &ps_r__dlss_jitter, 0, 1);
     CMD4(CCC_Integer, "r__dlss_jsign", &ps_r__dlss_jsign, 0, 3);
 #endif
