@@ -67,7 +67,18 @@ extern ECORE_API int ps_r__clear_models_on_unload;
 // NVIDIA DLSS (R4 only)
 extern ECORE_API int ps_r__dlss;
 extern ECORE_API int ps_r__dlss_preset;
-extern ECORE_API int ps_r__dlss_mode;
+extern ECORE_API u32 ps_r__dlss_mode;
+extern ECORE_API const xr_token qdlss_mode_token[];
+extern ECORE_API int ps_r__dlss_nr;
+extern ECORE_API int ps_r__dlss_nr_preset;
+extern ECORE_API float ps_r__dlss_nr_intensity;
+extern ECORE_API float ps_r__dlss_nr_global_tone;
+extern ECORE_API float ps_r__dlss_nr_local_tone;
+extern ECORE_API float ps_r__dlss_nr_local_structure;
+extern ECORE_API float ps_r__dlss_nr_skin_structure;
+extern ECORE_API int ps_r__dlss_nr_style;
+extern ECORE_API int ps_r__dlss_nr_automask;
+extern ECORE_API int ps_r__dlss_nr_ui_correction;
 extern ECORE_API int ps_r__dlss_jitter;
 extern ECORE_API int ps_r__dlss_jsign;
 

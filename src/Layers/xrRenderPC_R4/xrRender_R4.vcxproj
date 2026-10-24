@@ -264,6 +264,7 @@
     <ClCompile Include="..\xrRenderDX11\dx11DetailManager_VS.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11HW.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11DLSS.cpp" />
+    <ClCompile Include="..\xrRenderDX11\dx11DLSS_NR.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11HWCaps.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11ResourceManager_Resources.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11ResourceManager_Scripting.cpp" />

@@ -51,5 +51,21 @@ void EndRenderRes();
 bool InRenderRes();
 
 void Shutdown(ID3D11Device* device);
+
+// Guides produced by the last Evaluate (render resolution): motion vectors (R16G16_FLOAT, pixels) and depth (R32_FLOAT).
+ID3D11Texture2D* LastMotionVectors();
+ID3D11Texture2D* LastDepth();
+bool LastWasReset();
+
+// ---- DLSS-NR ("DLSS 5" neural rendering, NGX feature 18) ----
+// NGX ships DLSS-NR for D3D12/Vulkan only, so it runs on a private D3D12 device that shares
+// textures and a fence with the engine's D3D11 device. Needs nvngx_dlssnr.dll next to the exe.
+// Console: r__dlss_nr 0/1, r__dlss_nr_preset, r__dlss_nr_intensity, r__dlss_nr_global_tone,
+// r__dlss_nr_local_tone, r__dlss_nr_local_structure, r__dlss_nr_skin_structure, r__dlss_nr_style,
+// r__dlss_nr_automask, r__dlss_nr_ui_correction
+//
+// Runs on the full-resolution (already anti-aliased / upscaled) image in place.
+bool EvaluateNR(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* color, u32 renderW, u32 renderH);
+void ShutdownNR();
 } // namespace dlss
 } // namespace xray::render::RENDER_NAMESPACE

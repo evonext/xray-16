@@ -242,6 +242,67 @@ function opt_video_adv:InitControls(x, y, xml, handler)
 	xml:InitStatic("video_adv:cap_r4_tessellation", _st)
 	ctl = xml:InitCheck("video_adv:check_r4_tessellation", _st)
 	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+-- DLSS / DLSS 5 neural rendering (OpenXRay fork, R4 only)
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss", _st)
+	ctl = xml:InitCheck("video_adv:check_dlss", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_mode", _st)
+	ctl = xml:InitComboBox("video_adv:combo_dlss_mode", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_preset", _st)
+	ctl = xml:InitTrackBar("video_adv:track_dlss_preset", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_nr", _st)
+	ctl = xml:InitCheck("video_adv:check_dlss_nr", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_nr_preset", _st)
+	ctl = xml:InitTrackBar("video_adv:track_dlss_nr_preset", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_nr_intensity", _st)
+	ctl = xml:InitTrackBar("video_adv:track_dlss_nr_intensity", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_nr_global_tone", _st)
+	ctl = xml:InitTrackBar("video_adv:track_dlss_nr_global_tone", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_nr_local_tone", _st)
+	ctl = xml:InitTrackBar("video_adv:track_dlss_nr_local_tone", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_nr_local_structure", _st)
+	ctl = xml:InitTrackBar("video_adv:track_dlss_nr_local_structure", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_nr_skin_structure", _st)
+	ctl = xml:InitTrackBar("video_adv:track_dlss_nr_skin_structure", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_nr_style", _st)
+	ctl = xml:InitTrackBar("video_adv:track_dlss_nr_style", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
+	_st = xml:InitStatic("video_adv:templ_item", nil)
+	xml:InitStatic("video_adv:cap_dlss_nr_automask", _st)
+	ctl = xml:InitCheck("video_adv:check_dlss_nr_automask", _st)
+	table.insert(handler.m_preconditions, {func=mode_4, control=_st})
+
 ---------
 	_st = xml:InitStatic("video_adv:templ_item", nil)
 	xml:InitStatic("video_adv:cap_vsync", _st)

@@ -153,7 +153,19 @@ int ps_r__clear_models_on_unload = 0; // Alundaio
 
 int ps_r__dlss = 0;
 int ps_r__dlss_preset = 0;
-int ps_r__dlss_mode = 0;
+u32 ps_r__dlss_mode = 0;
+const xr_token qdlss_mode_token[] = { { "st_dlss_dlaa", 0 }, { "st_dlss_quality", 1 }, { "st_dlss_balanced", 2 },
+    { "st_dlss_performance", 3 }, { "st_dlss_ultra_performance", 4 }, { nullptr, 0 } };
+int ps_r__dlss_nr = 0;
+int ps_r__dlss_nr_preset = 2;
+float ps_r__dlss_nr_intensity = 1.f;
+float ps_r__dlss_nr_global_tone = 0.9f;
+float ps_r__dlss_nr_local_tone = 1.22f;
+float ps_r__dlss_nr_local_structure = 0.44f;
+float ps_r__dlss_nr_skin_structure = 1.16f;
+int ps_r__dlss_nr_style = 1;
+int ps_r__dlss_nr_automask = 1;
+int ps_r__dlss_nr_ui_correction = 0;
 int ps_r__dlss_jitter = 1;
 int ps_r__dlss_jsign = 0;
 
@@ -780,7 +792,17 @@ void xrRender_initconsole()
 #if defined(USE_DX11) && defined(XR_DLSS)
     CMD4(CCC_Integer, "r__dlss", &ps_r__dlss, 0, 1);
     CMD4(CCC_Integer, "r__dlss_preset", &ps_r__dlss_preset, 0, 15);
-    CMD4(CCC_Integer, "r__dlss_mode", &ps_r__dlss_mode, 0, 4);
+    CMD3(CCC_Token, "r__dlss_mode", &ps_r__dlss_mode, qdlss_mode_token);
+    CMD4(CCC_Integer, "r__dlss_nr", &ps_r__dlss_nr, 0, 1);
+    CMD4(CCC_Integer, "r__dlss_nr_preset", &ps_r__dlss_nr_preset, 0, 15);
+    CMD4(CCC_Float, "r__dlss_nr_intensity", &ps_r__dlss_nr_intensity, 0.f, 2.f);
+    CMD4(CCC_Float, "r__dlss_nr_global_tone", &ps_r__dlss_nr_global_tone, 0.f, 2.f);
+    CMD4(CCC_Float, "r__dlss_nr_local_tone", &ps_r__dlss_nr_local_tone, 0.f, 2.f);
+    CMD4(CCC_Float, "r__dlss_nr_local_structure", &ps_r__dlss_nr_local_structure, 0.f, 2.f);
+    CMD4(CCC_Float, "r__dlss_nr_skin_structure", &ps_r__dlss_nr_skin_structure, -1.f, 2.f);
+    CMD4(CCC_Integer, "r__dlss_nr_style", &ps_r__dlss_nr_style, 0, 15);
+    CMD4(CCC_Integer, "r__dlss_nr_automask", &ps_r__dlss_nr_automask, 0, 1);
+    CMD4(CCC_Integer, "r__dlss_nr_ui_correction", &ps_r__dlss_nr_ui_correction, 0, 1);
     CMD4(CCC_Integer, "r__dlss_jitter", &ps_r__dlss_jitter, 0, 1);
     CMD4(CCC_Integer, "r__dlss_jsign", &ps_r__dlss_jsign, 0, 3);
 #endif

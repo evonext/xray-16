@@ -457,6 +457,14 @@ void CRenderTarget::phase_combine()
         in.jitterPx.set(Device.mProjectJitterApplied.x * float(in.width) * 0.5f,
             -Device.mProjectJitterApplied.y * float(in.height) * 0.5f);
         dlss_done = dlss::Evaluate(HW.pDevice, HW.pContext1, in);
+        // DLSS 5 neural rendering on the full-resolution anti-aliased image
+        if (dlss_done && ps_r__dlss_nr)
+        {
+            PIX_EVENT(DLSS_NR);
+            ID3D11Texture2D* full = in.output ? in.output : in.color;
+            dlss::EvaluateNR(HW.pDevice, in.ctx, full, in.width, in.height);
+            RCache.Invalidate();
+        }
     }
     {
         Fvector2 jitter_px, jitter_ndc;

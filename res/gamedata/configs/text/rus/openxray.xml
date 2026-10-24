@@ -132,4 +132,55 @@
 	<string id="ukr">
 		<text>Украинский (Ukrainian)</text>
 	</string>
+	<string id="ui_mm_dlss">
+		<text>DLSS</text>
+	</string>
+	<string id="ui_mm_dlss_mode">
+		<text>Режим DLSS</text>
+	</string>
+	<string id="ui_mm_dlss_preset">
+		<text>Модель DLSS</text>
+	</string>
+	<string id="ui_mm_dlss_nr">
+		<text>DLSS 5 нейрофильтр</text>
+	</string>
+	<string id="ui_mm_dlss_nr_preset">
+		<text>Пресет фильтра</text>
+	</string>
+	<string id="ui_mm_dlss_nr_intensity">
+		<text>Сила фильтра</text>
+	</string>
+	<string id="ui_mm_dlss_nr_global_tone">
+		<text>Общий тон</text>
+	</string>
+	<string id="ui_mm_dlss_nr_local_tone">
+		<text>Локальный тон</text>
+	</string>
+	<string id="ui_mm_dlss_nr_local_structure">
+		<text>Детализация</text>
+	</string>
+	<string id="ui_mm_dlss_nr_skin_structure">
+		<text>Кожа</text>
+	</string>
+	<string id="ui_mm_dlss_nr_style">
+		<text>Стиль</text>
+	</string>
+	<string id="ui_mm_dlss_nr_automask">
+		<text>Автомаска</text>
+	</string>
+	<string id="st_dlss_dlaa">
+		<text>DLAA (родное)</text>
+	</string>
+	<string id="st_dlss_quality">
+		<text>Качество</text>
+	</string>
+	<string id="st_dlss_balanced">
+		<text>Баланс</text>
+	</string>
+	<string id="st_dlss_performance">
+		<text>Производительность</text>
+	</string>
+	<string id="st_dlss_ultra_performance">
+		<text>Ультра производ.</text>
+	</string>
 </string_table>

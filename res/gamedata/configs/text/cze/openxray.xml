@@ -168,4 +168,55 @@
 	<string id="jpn">
 		<text>Japonština (Japan)</text>
 	</string>
+	<string id="ui_mm_dlss">
+		<text>DLSS</text>
+	</string>
+	<string id="ui_mm_dlss_mode">
+		<text>DLSS mode</text>
+	</string>
+	<string id="ui_mm_dlss_preset">
+		<text>DLSS model</text>
+	</string>
+	<string id="ui_mm_dlss_nr">
+		<text>DLSS 5 neural filter</text>
+	</string>
+	<string id="ui_mm_dlss_nr_preset">
+		<text>Filter preset</text>
+	</string>
+	<string id="ui_mm_dlss_nr_intensity">
+		<text>Filter strength</text>
+	</string>
+	<string id="ui_mm_dlss_nr_global_tone">
+		<text>Global tone</text>
+	</string>
+	<string id="ui_mm_dlss_nr_local_tone">
+		<text>Local tone</text>
+	</string>
+	<string id="ui_mm_dlss_nr_local_structure">
+		<text>Structure</text>
+	</string>
+	<string id="ui_mm_dlss_nr_skin_structure">
+		<text>Skin</text>
+	</string>
+	<string id="ui_mm_dlss_nr_style">
+		<text>Style</text>
+	</string>
+	<string id="ui_mm_dlss_nr_automask">
+		<text>Auto mask</text>
+	</string>
+	<string id="st_dlss_dlaa">
+		<text>DLAA (native)</text>
+	</string>
+	<string id="st_dlss_quality">
+		<text>Quality</text>
+	</string>
+	<string id="st_dlss_balanced">
+		<text>Balanced</text>
+	</string>
+	<string id="st_dlss_performance">
+		<text>Performance</text>
+	</string>
+	<string id="st_dlss_ultra_performance">
+		<text>Ultra Performance</text>
+	</string>
 </string_table>

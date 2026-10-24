@@ -65,6 +65,7 @@ Fmatrix g_prev_vp;
 Fvector g_prev_cam;
 bool g_have_prev = false;
 u32 g_jitter_index = 0;
+bool g_last_reset = true;
 
 struct alignas(16) MVConstants
 {
@@ -336,7 +337,7 @@ bool ensure_textures(ID3D11Device* device, const FrameInputs& in)
 bool ensure_feature(ID3D11DeviceContext* ctx, const FrameInputs& in)
 {
     const int preset = ps_r__dlss_preset;
-    const int mode = (in.outWidth == in.width && in.outHeight == in.height) ? 0 : ps_r__dlss_mode;
+    const int mode = (in.outWidth == in.width && in.outHeight == in.height) ? 0 : int(ps_r__dlss_mode);
     if (g_feature && g_feat_w == in.width && g_feat_h == in.height && g_feat_ow == in.outWidth &&
         g_feat_oh == in.outHeight && g_feat_preset == preset && g_feat_mode == mode)
         return true;
@@ -422,6 +423,7 @@ bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInput
         reset = true;
     if (reset)
         g_prev_vp = cur_vp;
+    g_last_reset = reset;
 
     MVConstants c;
     c.inv_view.invert(in.view);
@@ -505,7 +507,7 @@ bool GetRenderSize(ID3D11Device* device, u32 outW, u32 outH, u32& rw, u32& rh)
 {
     rw = outW;
     rh = outH;
-    const int mode = ps_r__dlss_mode;
+    const int mode = int(ps_r__dlss_mode);
     if (!ps_r__dlss || mode <= 0 || mode > 4 || !try_init(device))
         return false;
 
@@ -549,8 +551,13 @@ void EndRenderRes()
 
 bool InRenderRes() { return g_render_res; }
 
+ID3D11Texture2D* LastMotionVectors() { return g_mv; }
+ID3D11Texture2D* LastDepth() { return g_zout; }
+bool LastWasReset() { return g_last_reset; }
+
 void Shutdown(ID3D11Device* device)
 {
+    ShutdownNR();
     release_feature();
     release_textures();
     safe_release(g_cs);

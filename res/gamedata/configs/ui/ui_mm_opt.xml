@@ -506,6 +506,98 @@
 				<e r="210" g="210" b="210"/>
 			</text_color>
         </btn_to_simply>
+        <!-- DLSS / DLSS 5 neural rendering (OpenXRay fork) -->
+        <cap_dlss x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss</text>
+        </cap_dlss>
+        <check_dlss x="167" y="0" width="44" height="29">
+            <texture>ui_inGame2_checkbox</texture>
+            <options_item entry="r__dlss" group="mm_opt_video_adv" depend="vid"/>
+        </check_dlss>
+
+        <cap_dlss_mode x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_mode</text>
+        </cap_dlss_mode>
+        <combo_dlss_mode x="180" y="0" width="235" height="20" list_length="5" always_show_scroll="0">
+            <options_item entry="r__dlss_mode" group="mm_opt_video_adv" depend="vid"/>
+            <list_font r="170" g="170" b="170" font="letterica16"/>
+            <text_color>
+                <e r="170" g="170" b="170"/>
+                <d r="70" g="70" b="70"/>
+            </text_color>
+        </combo_dlss_mode>
+
+        <cap_dlss_preset x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_preset</text>
+        </cap_dlss_preset>
+        <track_dlss_preset x="180" y="6" width="235" height="16" step="1" is_integer="1">
+            <options_item entry="r__dlss_preset" group="mm_opt_video_adv"/>
+        </track_dlss_preset>
+
+        <cap_dlss_nr x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_nr</text>
+        </cap_dlss_nr>
+        <check_dlss_nr x="167" y="0" width="44" height="29">
+            <texture>ui_inGame2_checkbox</texture>
+            <options_item entry="r__dlss_nr" group="mm_opt_video_adv"/>
+        </check_dlss_nr>
+
+        <cap_dlss_nr_preset x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_nr_preset</text>
+        </cap_dlss_nr_preset>
+        <track_dlss_nr_preset x="180" y="6" width="235" height="16" step="1" is_integer="1">
+            <options_item entry="r__dlss_nr_preset" group="mm_opt_video_adv"/>
+        </track_dlss_nr_preset>
+
+        <cap_dlss_nr_intensity x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_nr_intensity</text>
+        </cap_dlss_nr_intensity>
+        <track_dlss_nr_intensity x="180" y="6" width="235" height="16" step="0.05">
+            <options_item entry="r__dlss_nr_intensity" group="mm_opt_video_adv"/>
+        </track_dlss_nr_intensity>
+
+        <cap_dlss_nr_global_tone x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_nr_global_tone</text>
+        </cap_dlss_nr_global_tone>
+        <track_dlss_nr_global_tone x="180" y="6" width="235" height="16" step="0.05">
+            <options_item entry="r__dlss_nr_global_tone" group="mm_opt_video_adv"/>
+        </track_dlss_nr_global_tone>
+
+        <cap_dlss_nr_local_tone x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_nr_local_tone</text>
+        </cap_dlss_nr_local_tone>
+        <track_dlss_nr_local_tone x="180" y="6" width="235" height="16" step="0.05">
+            <options_item entry="r__dlss_nr_local_tone" group="mm_opt_video_adv"/>
+        </track_dlss_nr_local_tone>
+
+        <cap_dlss_nr_local_structure x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_nr_local_structure</text>
+        </cap_dlss_nr_local_structure>
+        <track_dlss_nr_local_structure x="180" y="6" width="235" height="16" step="0.05">
+            <options_item entry="r__dlss_nr_local_structure" group="mm_opt_video_adv"/>
+        </track_dlss_nr_local_structure>
+
+        <cap_dlss_nr_skin_structure x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_nr_skin_structure</text>
+        </cap_dlss_nr_skin_structure>
+        <track_dlss_nr_skin_structure x="180" y="6" width="235" height="16" step="0.05">
+            <options_item entry="r__dlss_nr_skin_structure" group="mm_opt_video_adv"/>
+        </track_dlss_nr_skin_structure>
+
+        <cap_dlss_nr_style x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_nr_style</text>
+        </cap_dlss_nr_style>
+        <track_dlss_nr_style x="180" y="6" width="235" height="16" step="1" is_integer="1">
+            <options_item entry="r__dlss_nr_style" group="mm_opt_video_adv"/>
+        </track_dlss_nr_style>
+
+        <cap_dlss_nr_automask x="20" y="3" width="135" height="24">
+            <text r="170" g="170" b="170" font="letterica16" align="r" vert_align="c">ui_mm_dlss_nr_automask</text>
+        </cap_dlss_nr_automask>
+        <check_dlss_nr_automask x="167" y="0" width="44" height="29">
+            <texture>ui_inGame2_checkbox</texture>
+            <options_item entry="r__dlss_nr_automask" group="mm_opt_video_adv"/>
+        </check_dlss_nr_automask>
     </video_adv>
 
     <tab_sound>
