@@ -77,6 +77,7 @@ int g_nr_preset = -1;
 SharedTex nr_color, nr_out, nr_mvec, nr_depth;
 DXGI_FORMAT nr_color_fmt = DXGI_FORMAT_UNKNOWN;
 u32 nr_guide_w = 0, nr_guide_h = 0;
+u32 nr_res_w = 0, nr_res_h = 0;
 
 std::wstring logs_dir_w()
 {
@@ -254,7 +255,7 @@ void wait_cpu(u64 value)
 
 bool ensure_resources(ID3D11Device* device11, u32 w, u32 h, DXGI_FORMAT color_fmt, u32 gw, u32 gh)
 {
-    if (nr_color.t11 && g_nr_w == w && g_nr_h == h && nr_color_fmt == color_fmt && nr_guide_w == gw && nr_guide_h == gh)
+    if (nr_color.t11 && nr_res_w == w && nr_res_h == h && nr_color_fmt == color_fmt && nr_guide_w == gw && nr_guide_h == gh)
         return true;
 
     // make sure the GPU is done with the old ones
@@ -272,6 +273,8 @@ bool ensure_resources(ID3D11Device* device11, u32 w, u32 h, DXGI_FORMAT color_fm
         !make_shared(device11, nr_depth, gw, gh, DXGI_FORMAT_R32_FLOAT, false, "depth"))
         return false;
     nr_color_fmt = color_fmt;
+    nr_res_w = w;
+    nr_res_h = h;
     nr_guide_w = gw;
     nr_guide_h = gh;
     Msg("* [DLSS-NR] shared buffers %ux%u (guides %ux%u), format %u", w, h, gw, gh, color_fmt);
@@ -328,7 +331,10 @@ bool ensure_nr_feature(u32 w, u32 h)
 
     if (NVSDK_NGX_FAILED(r) || !g_nr_feature)
     {
-        Msg("! [DLSS-NR] CreateFeature(18) failed: 0x%08x. Check nvngx_dlssnr.dll next to xrEngine.exe and the NVIDIA driver version.", r);
+        Msg("! [DLSS-NR] CreateFeature(18) failed: 0x%08x (%s)", r,
+            r == NVSDK_NGX_Result_FAIL_OutOfDate ? "NVIDIA driver too old for DLSS-NR: needs 615.00+" :
+            r == NVSDK_NGX_Result_FAIL_FeatureNotFound ? "nvngx_dlssnr.dll not found next to xrEngine.exe" :
+            r == NVSDK_NGX_Result_FAIL_FeatureNotSupported ? "GPU not supported" : "see NGX log");
         g_nr_feature = nullptr;
         g_nr_failed_feature = true;
         return false;
@@ -354,7 +360,7 @@ bool EvaluateNR(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D*
         if (!g_nr_ok)
             Msg("! [DLSS-NR] disabled for this session");
     }
-    if (!g_nr_ok)
+    if (!g_nr_ok || g_nr_failed_feature)
         return false;
 
     ID3D11Texture2D* mv = LastMotionVectors();
