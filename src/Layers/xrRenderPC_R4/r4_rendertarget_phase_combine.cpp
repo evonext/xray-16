@@ -22,6 +22,13 @@ void CRenderTarget::phase_combine()
 #if defined(XR_DLSS)
     // DLSS replaces the engine's edge AA and motion blur
     const bool dlss_on = !_menu_pp && !RImplementation.o.msaa && dlss::Enabled(HW.pDevice);
+    if (ps_r__dlss && RImplementation.o.msaa)
+    {
+        static bool warned = false;
+        if (!warned)
+            Msg("! [DLSS] disabled: turn MSAA off (r3_msaa st_opt_off) to use DLSS");
+        warned = true;
+    }
 #else
     constexpr bool dlss_on = false;
 #endif

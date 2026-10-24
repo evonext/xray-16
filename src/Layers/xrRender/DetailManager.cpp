@@ -234,6 +234,12 @@ void CDetailManager::Load()
 void CDetailManager::Unload()
 {
     ZoneScoped;
+    // fork fix: never unload while the async detail calculation is still running
+    if (m_calc_task)
+    {
+        TaskScheduler->Wait(*m_calc_task);
+        m_calc_task = nullptr;
+    }
     if (UseVS())
         hw_Unload();
     else
@@ -408,7 +414,8 @@ void CDetailManager::Render(CBackend& cmd_list, const Fsphere* bounds)
 
     ZoneScoped;
 
-    TaskScheduler->Wait(*m_calc_task);
+    if (m_calc_task)
+        TaskScheduler->Wait(*m_calc_task);
 
     RImplementation.BasicStats.DetailRender.Begin();
     g_pGamePersistent->m_pGShaderConstants->m_blender_mode.w = 1.0f; //--#SM+#-- Флаг начала рендера травы [begin of grass render]
@@ -434,6 +441,11 @@ void CDetailManager::Render(CBackend& cmd_list, const Fsphere* bounds)
 
 void CDetailManager::DispatchMTCalc()
 {
+    // fork fix: if the previous calculation was not consumed by Render() (loading, reset, frames without
+    // details), it may still be running. Two concurrent cache_Update() calls share xrc and the cache
+    // and crash in xrXRC::box_query.
+    if (m_calc_task)
+        TaskScheduler->Wait(*m_calc_task);
     m_calc_task = &TaskScheduler->AddTask([this]
     {
 #ifndef _EDITOR
