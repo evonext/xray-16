@@ -2201,6 +2201,27 @@ constexpr hit_type_name hit_type_names[] = {
     { "prot_explosion", ALife::eHitTypeExplosion },
 };
 
+float bones_max_armor(const SBoneProtections& bp)
+{
+    float m = 0.f;
+    for (const auto& [id, b] : bp.m_bones_koeff)
+        m = _max(m, b.armor);
+    return m;
+}
+
+void bones_set_armor(SBoneProtections& bp, float value)
+{
+    value = _max(value, 0.f);
+    const float cur = bones_max_armor(bp);
+    for (auto& [id, b] : bp.m_bones_koeff)
+    {
+        if (cur > EPS)
+            b.armor *= value / cur;
+        else
+            b.armor = value;
+    }
+}
+
 float* hit_prot(HitImmunity::HitTypeSVec& v, pcstr name)
 {
     for (const auto& h : hit_type_names)
@@ -2244,6 +2265,10 @@ float CScriptGameObject::GetItemParam(pcstr name) const
             return *p;
         if (!xr_strcmp(name, "power_loss"))
             return o->m_fPowerLoss;
+        if (!xr_strcmp(name, "armor"))
+            return bones_max_armor(o->m_boneProtection);
+        if (!xr_strcmp(name, "hit_fraction"))
+            return o->m_boneProtection.m_fHitFrac;
         if (!xr_strcmp(name, "additional_weight"))
             return o->m_additional_weight;
         if (!xr_strcmp(name, "health_restore"))
@@ -2262,6 +2287,10 @@ float CScriptGameObject::GetItemParam(pcstr name) const
     {
         if (float* p = hit_prot(h->m_HitTypeProtection, name))
             return *p;
+        if (h->m_boneProtection && !xr_strcmp(name, "armor"))
+            return bones_max_armor(*h->m_boneProtection);
+        if (h->m_boneProtection && !xr_strcmp(name, "hit_fraction"))
+            return h->m_boneProtection->m_fHitFrac;
         return 0.f;
     }
     return 0.f;
@@ -2305,6 +2334,8 @@ bool CScriptGameObject::SetItemParam(pcstr name, float value)
     {
         if (float* p = hit_prot(o->m_HitTypeProtection, name)) { *p = value; return true; }
         if (!xr_strcmp(name, "power_loss")) { o->m_fPowerLoss = value; return true; }
+        if (!xr_strcmp(name, "armor")) { bones_set_armor(o->m_boneProtection, value); return true; }
+        if (!xr_strcmp(name, "hit_fraction")) { o->m_boneProtection.m_fHitFrac = _max(value, 0.f); return true; }
         if (!xr_strcmp(name, "additional_weight"))
         {
             o->m_additional_weight = value;
@@ -2321,6 +2352,8 @@ bool CScriptGameObject::SetItemParam(pcstr name, float value)
     if (auto* h = smart_cast<CHelmet*>(&object()))
     {
         if (float* p = hit_prot(h->m_HitTypeProtection, name)) { *p = value; return true; }
+        if (h->m_boneProtection && !xr_strcmp(name, "armor")) { bones_set_armor(*h->m_boneProtection, value); return true; }
+        if (h->m_boneProtection && !xr_strcmp(name, "hit_fraction")) { h->m_boneProtection->m_fHitFrac = _max(value, 0.f); return true; }
         return false;
     }
     return false;
