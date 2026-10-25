@@ -426,7 +426,8 @@ bool make_shared(ID3D11Device* device11, SharedTex& t, u32 w, u32 h, DXGI_FORMAT
         nullptr, __uuidof(ID3D12Resource), reinterpret_cast<void**>(&t.r12));
     if (FAILED(hr))
     {
-        Msg("! [DLSS-NR] cannot create shared %s %ux%u fmt %u: 0x%08x", name, w, h, fmt, hr);
+        Msg("! [DLSS-NR] cannot create shared %s %ux%u fmt %u: 0x%08x (device removed reason 0x%08x)", name, w, h, fmt, hr,
+            nr_dev12 ? nr_dev12->GetDeviceRemovedReason() : 0);
         return false;
     }
     HANDLE handle = nullptr;
@@ -602,6 +603,11 @@ bool EvaluateNR(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D*
     }
     if (!ensure_nr_feature(cd.Width, cd.Height))
         return false;
+
+    // DLAA path: color is still bound as the engine's render target here. A resource bound as RTV
+    // cannot be read through an SRV (D3D11 silently nulls the SRV), so unbind outputs first.
+    // RCache.Invalidate() after EvaluateNR rebinds everything the engine needs.
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
 
     // D3D11 -> shared
     if (!opaque_copy(device, ctx, color, nr_color.t11, cd.Width, cd.Height))
