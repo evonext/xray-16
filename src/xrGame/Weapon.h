@@ -26,6 +26,7 @@ class CNightVisionEffector;
 
 class CWeapon : public CHudItemObject, public CShootingObject
 {
+    friend class CScriptGameObject; // zone console: get/set_item_param
     typedef CHudItemObject inherited;
 
 public:

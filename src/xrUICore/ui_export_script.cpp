@@ -757,6 +757,8 @@ void CUIButton::script_register(lua_State* luaState)
             .def("SetOptIBounds", &CUITrackBar::SetOptIBounds)
             .def("SetOptFBounds", &CUITrackBar::SetOptFBounds)
             .def("SetCurrentValue", &CUITrackBar::SetCurrentOptValue)
+            .def("SetFValue", &CUITrackBar::SetFValueScript)
+            .def("SetIValue", &CUITrackBar::SetIValueScript)
     ];
 }
 

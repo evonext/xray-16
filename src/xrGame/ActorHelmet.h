@@ -6,6 +6,7 @@ struct SBoneProtections;
 
 class CHelmet : public CInventoryItemObject
 {
+    friend class CScriptGameObject; // zone console: get/set_item_param
     using inherited = CInventoryItemObject;
 
 public:

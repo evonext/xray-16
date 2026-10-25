@@ -2174,3 +2174,154 @@ void CScriptGameObject::SetCharacterIcon(pcstr iconName)
     return pInventoryOwner->SetIcon(iconName);
 }
 //-Alundaio
+
+// ---------------------------------------------------------------------------------------------
+// Zone console: item stats by name. Values live in the object (not in the ini), so they last
+// until the item is reloaded; the script re-applies its own overrides after loading a save.
+// ---------------------------------------------------------------------------------------------
+#include "CustomOutfit.h"
+#include "ActorHelmet.h"
+
+namespace
+{
+struct hit_type_name
+{
+    pcstr name;
+    ALife::EHitType type;
+};
+constexpr hit_type_name hit_type_names[] = {
+    { "prot_burn", ALife::eHitTypeBurn },
+    { "prot_shock", ALife::eHitTypeShock },
+    { "prot_chemical_burn", ALife::eHitTypeChemicalBurn },
+    { "prot_radiation", ALife::eHitTypeRadiation },
+    { "prot_telepatic", ALife::eHitTypeTelepatic },
+    { "prot_wound", ALife::eHitTypeWound },
+    { "prot_fire_wound", ALife::eHitTypeFireWound },
+    { "prot_strike", ALife::eHitTypeStrike },
+    { "prot_explosion", ALife::eHitTypeExplosion },
+};
+
+float* hit_prot(HitImmunity::HitTypeSVec& v, pcstr name)
+{
+    for (const auto& h : hit_type_names)
+        if (!xr_strcmp(h.name, name) && size_t(h.type) < v.size())
+            return &v[h.type];
+    return nullptr;
+}
+} // namespace
+
+float CScriptGameObject::GetItemParam(pcstr name) const
+{
+    if (!name)
+        return 0.f;
+    if (auto* w = smart_cast<CWeapon*>(&object()))
+    {
+        if (!xr_strcmp(name, "hit_power"))
+            return w->fvHitPower.x;
+        if (!xr_strcmp(name, "hit_impulse"))
+            return w->fHitImpulse;
+        if (!xr_strcmp(name, "fire_distance"))
+            return w->fireDistance;
+        if (!xr_strcmp(name, "dispersion"))
+            return rad2deg(w->fireDispersionBase);
+        if (!xr_strcmp(name, "rpm"))
+            return w->fOneShotTime > EPS ? 60.f / w->fOneShotTime : 0.f;
+        if (!xr_strcmp(name, "bullet_speed"))
+            return w->m_fStartBulletSpeed;
+        if (!xr_strcmp(name, "mag_size"))
+            return float(w->iMagazineSize);
+        if (!xr_strcmp(name, "recoil"))
+            return rad2deg(w->cam_recoil.Dispersion);
+        if (!xr_strcmp(name, "recoil_inc"))
+            return rad2deg(w->cam_recoil.DispersionInc);
+        if (!xr_strcmp(name, "wear_per_shot"))
+            return w->conditionDecreasePerShot;
+        return 0.f;
+    }
+    if (auto* o = smart_cast<CCustomOutfit*>(&object()))
+    {
+        if (float* p = hit_prot(o->m_HitTypeProtection, name))
+            return *p;
+        if (!xr_strcmp(name, "power_loss"))
+            return o->m_fPowerLoss;
+        if (!xr_strcmp(name, "additional_weight"))
+            return o->m_additional_weight;
+        if (!xr_strcmp(name, "health_restore"))
+            return o->m_fHealthRestoreSpeed;
+        if (!xr_strcmp(name, "radiation_restore"))
+            return o->m_fRadiationRestoreSpeed;
+        if (!xr_strcmp(name, "satiety_restore"))
+            return o->m_fSatietyRestoreSpeed;
+        if (!xr_strcmp(name, "power_restore"))
+            return o->m_fPowerRestoreSpeed;
+        if (!xr_strcmp(name, "bleeding_restore"))
+            return o->m_fBleedingRestoreSpeed;
+        return 0.f;
+    }
+    if (auto* h = smart_cast<CHelmet*>(&object()))
+    {
+        if (float* p = hit_prot(h->m_HitTypeProtection, name))
+            return *p;
+        return 0.f;
+    }
+    return 0.f;
+}
+
+bool CScriptGameObject::SetItemParam(pcstr name, float value)
+{
+    if (!name)
+        return false;
+    if (auto* w = smart_cast<CWeapon*>(&object()))
+    {
+        if (!xr_strcmp(name, "hit_power"))
+        {
+            w->fvHitPower.set(value, value, value, value);
+            w->fvHitPowerCritical.set(value, value, value, value);
+            return true;
+        }
+        if (!xr_strcmp(name, "hit_impulse")) { w->fHitImpulse = value; return true; }
+        if (!xr_strcmp(name, "fire_distance")) { w->fireDistance = value; return true; }
+        if (!xr_strcmp(name, "dispersion")) { w->fireDispersionBase = deg2rad(_max(value, 0.f)); return true; }
+        if (!xr_strcmp(name, "rpm")) { w->fOneShotTime = value > 1.f ? 60.f / value : w->fOneShotTime; return true; }
+        if (!xr_strcmp(name, "bullet_speed")) { w->m_fStartBulletSpeed = _max(value, 1.f); return true; }
+        if (!xr_strcmp(name, "mag_size")) { w->iMagazineSize = _max(iFloor(value + 0.5f), 1); return true; }
+        if (!xr_strcmp(name, "recoil"))
+        {
+            const float k = w->cam_recoil.Dispersion > EPS ? deg2rad(value) / w->cam_recoil.Dispersion : 1.f;
+            w->cam_recoil.Dispersion = deg2rad(_max(value, 0.f));
+            w->zoom_cam_recoil.Dispersion *= k;
+            return true;
+        }
+        if (!xr_strcmp(name, "recoil_inc"))
+        {
+            w->cam_recoil.DispersionInc = deg2rad(_max(value, 0.f));
+            w->zoom_cam_recoil.DispersionInc = w->cam_recoil.DispersionInc;
+            return true;
+        }
+        if (!xr_strcmp(name, "wear_per_shot")) { w->conditionDecreasePerShot = _max(value, 0.f); return true; }
+        return false;
+    }
+    if (auto* o = smart_cast<CCustomOutfit*>(&object()))
+    {
+        if (float* p = hit_prot(o->m_HitTypeProtection, name)) { *p = value; return true; }
+        if (!xr_strcmp(name, "power_loss")) { o->m_fPowerLoss = value; return true; }
+        if (!xr_strcmp(name, "additional_weight"))
+        {
+            o->m_additional_weight = value;
+            o->m_additional_weight2 = value;
+            return true;
+        }
+        if (!xr_strcmp(name, "health_restore")) { o->m_fHealthRestoreSpeed = value; return true; }
+        if (!xr_strcmp(name, "radiation_restore")) { o->m_fRadiationRestoreSpeed = value; return true; }
+        if (!xr_strcmp(name, "satiety_restore")) { o->m_fSatietyRestoreSpeed = value; return true; }
+        if (!xr_strcmp(name, "power_restore")) { o->m_fPowerRestoreSpeed = value; return true; }
+        if (!xr_strcmp(name, "bleeding_restore")) { o->m_fBleedingRestoreSpeed = value; return true; }
+        return false;
+    }
+    if (auto* h = smart_cast<CHelmet*>(&object()))
+    {
+        if (float* p = hit_prot(h->m_HitTypeProtection, name)) { *p = value; return true; }
+        return false;
+    }
+    return false;
+}

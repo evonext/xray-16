@@ -35,6 +35,9 @@ public:
     void SetCheck(bool b);
     int GetIValue() { return m_i_val; }
     float GetFValue() { return m_f_val; }
+    // script: set the value directly (zone console sliders)
+    void SetFValueScript(float v) { m_f_val = v; clamp(m_f_val, m_f_min, m_f_max); m_b_is_float = true; m_b_bound_already_set = true; UpdatePos(); }
+    void SetIValueScript(int v) { m_i_val = v; clamp(m_i_val, m_i_min, m_i_max); m_b_is_float = false; m_b_bound_already_set = true; UpdatePos(); }
     void SetOptIBounds(int imin, int imax);
     void SetOptFBounds(float fmin, float fmax);
 

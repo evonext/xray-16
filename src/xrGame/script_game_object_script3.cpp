@@ -524,6 +524,8 @@ luabind::class_<CScriptGameObject>& script_register_game_object2(luabind::class_
         .def("can_install_upgrade", &CScriptGameObject::CanInstallUpgrade)
         .def("can_add_upgrade", &CScriptGameObject::CanAddUpgrade)
         .def("iterate_installed_upgrades", &CScriptGameObject::IterateInstalledUpgrades)
+        .def("get_item_param", &CScriptGameObject::GetItemParam)
+        .def("set_item_param", &CScriptGameObject::SetItemParam)
         .def("weapon_in_grenade_mode", &CScriptGameObject::WeaponInGrenadeMode)
 
         // For CHudItem

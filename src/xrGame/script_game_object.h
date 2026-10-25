@@ -874,6 +874,9 @@ public:
     bool CanAddUpgrade(pcstr upgrade) const;
     bool CanInstallUpgrade(pcstr upgrade) const;
     void IterateInstalledUpgrades(luabind::functor<void> functor);
+    // zone console: read/write weapon and armor stats by name (see script_game_object_itemparams.cpp)
+    float GetItemParam(pcstr name) const;
+    bool SetItemParam(pcstr name, float value);
     bool WeaponInGrenadeMode();
 
     //Car

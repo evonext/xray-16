@@ -20,6 +20,7 @@ extern const Fvector zero_vel;
 
 class CShootingObject : public IAnticheatDumpable
 {
+    friend class CScriptGameObject; // zone console: get/set_item_param
     Lock render_lock{};
 protected:
     CShootingObject();
