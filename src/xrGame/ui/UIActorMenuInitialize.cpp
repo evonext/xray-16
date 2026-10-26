@@ -43,11 +43,16 @@ constexpr cpcstr CAR_BODY_XML        = "carbody_new.xml";
 constexpr cpcstr CARBODY_ITEM_XML    = "carbody_item.xml";
 }
 
+// Bumped every time the actor menu is (re)created (level load, ui reset on vid_restart).
+// Scripts that attach windows to it use this to notice the new instance.
+u32 g_actor_menu_instance_id = 0;
+
 CUIActorMenu::CUIActorMenu()
     : CUIDialogWnd(CUIActorMenu::GetDebugType()), m_currMenuMode(mmUndefined), m_last_time(u32(-1)),
       m_repair_mode(false), m_item_info_view(false), m_highlight_clear(true),
       m_trade_partner_inventory_state(0)
 {
+    ++g_actor_menu_instance_id;
     Construct();
 }
 

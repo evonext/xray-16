@@ -17,6 +17,8 @@
 #include "xrGame/ui/UIMainIngameWnd.h"
 #include "eatable_item.h"
 
+extern u32 g_actor_menu_instance_id; // UIActorMenuInitialize.cpp
+
 void CUIActorMenu::TryRepairItem(CUIWindow* w, void* d)
 {
     PIItem item = get_upgrade_item();
@@ -153,6 +155,7 @@ void CUIActorMenu::script_register(lua_State* luaState)
     [
         def("get_pda_menu", +[](){ return &CurrentGameUI()->GetPdaMenu(); }),
         def("get_actor_menu", +[](){ return &CurrentGameUI()->GetActorMenu(); }),
+        def("get_menu_id", +[]() { return g_actor_menu_instance_id; }),
         def("get_menu_mode", +[](){ return CurrentGameUI()->GetActorMenu().GetMenuMode(); }),
         def("get_maingame", +[](){ return CurrentGameUI()->UIMainIngameWnd; })
     ];
