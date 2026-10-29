@@ -95,6 +95,7 @@
     <ClInclude Include="..\xrRenderDX11\dx11ConstantBuffer_impl.h" />
     <ClInclude Include="..\xrRenderDX11\dx11HW.h" />
     <ClInclude Include="..\xrRenderDX11\dx11DLSS.h" />
+    <ClInclude Include="..\xrRenderDX11\dx11RT.h" />
     <ClInclude Include="..\xrRenderDX11\dx11R_Backend_Runtime.h" />
     <ClInclude Include="..\xrRenderDX11\dx11r_constants_cache.h" />
     <ClInclude Include="..\xrRenderDX11\dx11StateUtils.h" />
@@ -265,6 +266,7 @@
     <ClCompile Include="..\xrRenderDX11\dx11HW.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11DLSS.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11DLSS_NR.cpp" />
+    <ClCompile Include="..\xrRenderDX11\dx11RT.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11HWCaps.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11ResourceManager_Resources.cpp" />
     <ClCompile Include="..\xrRenderDX11\dx11ResourceManager_Scripting.cpp" />

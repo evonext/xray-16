@@ -10,6 +10,9 @@
 #if defined(USE_DX11)
 #include "Layers/xrRender/FHierrarhyVisual.h"
 #include "Layers/xrRenderDX11/3DFluid/dx113DFluidVolume.h"
+#if defined(XR_DLSS)
+#include "Layers/xrRenderDX11/dx11RT.h"
+#endif
 #endif
 
 namespace xray::render::RENDER_NAMESPACE
@@ -116,6 +119,10 @@ void CRender::level_Unload()
         return;
     if (!b_loaded)
         return;
+
+#if defined(XR_DLSS)
+    rt::OnLevelUnload();
+#endif
 
     // HOM
     HOM.Unload();

@@ -2,6 +2,7 @@
 
 #include "dx11HW.h"
 #include "dx11DLSS.h"
+#include "dx11RT.h"
 
 #include "StateManager/dx11SamplerStateCache.h"
 #include "dx11TextureUtils.h"
@@ -437,7 +438,10 @@ void CHW::DestroyDevice()
 {
 #if defined(XR_DLSS)
     if (ThisInstanceIsGlobal())
+    {
+        rt::Shutdown();
         dlss::Shutdown(pDevice);
+    }
 #endif
     if (ThisInstanceIsGlobal()) // only if we are global HW
     {

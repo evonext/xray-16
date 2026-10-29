@@ -3,6 +3,7 @@
 #include "xrEngine/Environment.h"
 #include "Layers/xrRender/dxEnvironmentRender.h"
 #include "Layers/xrRenderDX11/dx11DLSS.h"
+#include "Layers/xrRenderDX11/dx11RT.h"
 
 #define STENCIL_CULL 0
 
@@ -431,6 +432,10 @@ void CRenderTarget::phase_combine()
     g_pGamePersistent->Environment().RenderFlares(); // lens-flares
 
 #if defined(XR_DLSS)
+    // Ray tracing: keep the level BVH in sync with the loaded level (r__rt)
+    if (!_menu_pp)
+        rt::Tick(HW.pDevice);
+
     // DLSS: scene color is in rt_Color here; post-process and UI come after
     bool dlss_redirected = false;
     bool dlss_done = false;
