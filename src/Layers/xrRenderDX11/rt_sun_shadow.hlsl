@@ -1,11 +1,12 @@
 // RT stage 1 debug: one ray per pixel towards the sun (DXR 1.1 inline ray tracing).
 // Compiled at build time by dxc (cs_6_5) into $(IntDir)rtgen/rt_sun_shadow_cs.h, see xrRender_R4.vcxproj.
 //
-// Inputs:  t_pos  - world position per pixel (w: 1 = geometry, 0 = sky, 2 = HUD), written by D3D11
+// width/height: size of the depth (render resolution); pixels map 1:1 onto the color target's top-left
+// Inputs:  t_z    - view-space depth per pixel (0 = sky, < 0 = HUD), written by D3D11
 //          u_out  - copy of the scene color; overwritten with the debug view
 // Modes:   1 = sun visibility * N.L (grey), 2 = reconstructed normals, 3 = scene darkened where RT shadow
 
-#define RS "RootConstants(num32BitConstants=12, b0), SRV(t0), DescriptorTable(SRV(t1), UAV(u0))"
+#define RS "RootConstants(num32BitConstants=32, b0), SRV(t0), DescriptorTable(SRV(t1), UAV(u0))"
 
 cbuffer C : register(b0)
 {
@@ -17,16 +18,31 @@ cbuffer C : register(b0)
     uint height;
     float max_dist;
     float pad;
+    float4 iv0; // inverse view, rows (row-vector convention), xyz used
+    float4 iv1;
+    float4 iv2;
+    float4 iv3;
+    float4 proj; // P11, P22, P31, P32 (as rendered)
 };
 
 RaytracingAccelerationStructure scene : register(t0);
-Texture2D<float4> t_pos : register(t1);
+Texture2D<float> t_z : register(t1);
 RWTexture2D<float4> u_out : register(u0);
 
+// World position + class (w: 1 = geometry, 0 = sky, 2 = HUD)
 float4 load_pos(int2 p)
 {
     p = clamp(p, int2(0, 0), int2(int(width) - 1, int(height) - 1));
-    return t_pos.Load(int3(p, 0));
+    const float z = t_z.Load(int3(p, 0));
+    if (z < 0.0)
+        return float4(0, 0, 0, 2);
+    if (z == 0.0)
+        return float4(0, 0, 0, 0);
+    const float2 uv = (float2(p) + 0.5) / float2(width, height);
+    const float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    const float3 v = float3((ndc.x - proj.z) * z / proj.x, (ndc.y - proj.w) * z / proj.y, z);
+    const float3 w = v.x * iv0.xyz + v.y * iv1.xyz + v.z * iv2.xyz + iv3.xyz;
+    return float4(w, 1.0);
 }
 
 // Pick the neighbour difference with the smaller depth step (avoids smearing normals across edges)
@@ -49,10 +65,12 @@ float3 pick_delta(float4 c, float4 a, float4 b)
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= width || id.y >= height)
+    uint ow, oh;
+    u_out.GetDimensions(ow, oh);
+    if (id.x >= width || id.y >= height || id.x >= ow || id.y >= oh)
         return;
     const int2 p = int2(id.xy);
-    const float4 c = t_pos.Load(int3(p, 0));
+    const float4 c = load_pos(p);
     const float4 scene_col = u_out[p];
 
     if (abs(c.w - 2.0) < 0.01)

@@ -84,13 +84,14 @@ ID3D11ComputeShader* rt_prep_cs = nullptr;
 ID3D11Buffer* rt_prep_cb = nullptr;
 ID3D11ShaderResourceView* rt_depth_srv = nullptr;
 ID3D11Texture2D* rt_depth_src = nullptr; // not owned
-ID3D11UnorderedAccessView* rt_pos_uav = nullptr;
+ID3D11Texture2D* rt_z11 = nullptr; // D3D11-only view depth (UAV), copied into the shared one
+ID3D11UnorderedAccessView* rt_z_uav = nullptr;
 
 ID3D12RootSignature* rt_rs = nullptr;
 ID3D12PipelineState* rt_pso = nullptr;
 ID3D12DescriptorHeap* rt_heap = nullptr;
 
-RtShared rt_s_pos, rt_s_out;
+RtShared rt_s_z, rt_s_out;
 u32 rt_pos_w = 0, rt_pos_h = 0, rt_out_w = 0, rt_out_h = 0;
 DXGI_FORMAT rt_out_fmt = DXGI_FORMAT_UNKNOWN;
 
@@ -101,7 +102,7 @@ struct alignas(16) RtPrepConstants
     float proj[4]; // P31, P32 (as rendered), P33, P43
 };
 
-struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (12 dwords)
+struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (32 dwords)
 {
     float sun[3];
     u32 mode;
@@ -111,10 +112,12 @@ struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (12 dwords)
     u32 height;
     float max_dist;
     float pad;
+    float iv[4][4]; // inverse view rows
+    float proj[4]; // P11, P22, P31, P32
 };
-static_assert(sizeof(RtTraceConstants) == 12 * 4);
+static_assert(sizeof(RtTraceConstants) == 32 * 4);
 
-// Depth -> world position. w: 1 = geometry, 0 = sky / far plane, 2 = HUD (weapon, hands)
+// Depth -> view-space z. 0 = sky / far plane, -1 = HUD (weapon, hands)
 constexpr const char* RT_PREP_CS = R"(
 cbuffer C : register(b0)
 {
@@ -123,7 +126,7 @@ cbuffer C : register(b0)
     float4 proj;
 };
 Texture2D<float> t_depth : register(t0);
-RWTexture2D<float4> u_pos : register(u0);
+RWTexture2D<float> u_z : register(u0);
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -131,18 +134,12 @@ void main(uint3 id : SV_DispatchThreadID)
     if (id.x >= (uint)size_p.x || id.y >= (uint)size_p.y)
         return;
     float d = t_depth.Load(int3(id.xy, 0));
-    float4 o = float4(0, 0, 0, 0);
+    float z = 0.0;
     if (d < 0.0199)
-        o.w = 2.0;
+        z = -1.0;
     else if (d < 0.99999)
-    {
-        float2 uv = (float2(id.xy) + 0.5) / size_p.xy;
-        float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
-        float z = proj.w / (d - proj.z);
-        float4 vp = float4((ndc.x - proj.x) * z / size_p.z, (ndc.y - proj.y) * z / size_p.w, z, 1.0);
-        o = float4(mul(vp, inv_view).xyz, 1.0);
-    }
-    u_pos[id.xy] = o;
+        z = proj.w / (d - proj.z);
+    u_z[id.xy] = z;
 }
 )";
 
@@ -593,7 +590,7 @@ bool rt_dbg_init(ID3D11Device* device11, ID3D11DeviceContext1* ctx1)
     return true;
 }
 
-bool rt_make_shared(ID3D11Device* device11, RtShared& t, u32 w, u32 h, DXGI_FORMAT fmt, const char* name)
+bool rt_make_shared(ID3D11Device* device11, RtShared& t, u32 w, u32 h, DXGI_FORMAT fmt, bool uav, const char* name)
 {
     t.release();
     D3D12_HEAP_PROPERTIES hp{};
@@ -607,8 +604,9 @@ bool rt_make_shared(ID3D11Device* device11, RtShared& t, u32 w, u32 h, DXGI_FORM
     rd.Format = fmt;
     rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if (uav)
+        rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     HRESULT hr = rt_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_SHARED, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr,
         __uuidof(ID3D12Resource), reinterpret_cast<void**>(&t.r12));
     if (FAILED(hr))
@@ -640,10 +638,11 @@ void rt_dbg_release_textures()
 {
     if (rt_queue && rt_fence && rt_fence_value)
         rt_wait_value(rt_fence_value);
-    rt_rel(rt_pos_uav);
+    rt_rel(rt_z_uav);
+    rt_rel(rt_z11);
     rt_rel(rt_depth_srv);
     rt_depth_src = nullptr;
-    rt_s_pos.release();
+    rt_s_z.release();
     rt_s_out.release();
     rt_pos_w = rt_pos_h = rt_out_w = rt_out_h = 0;
     rt_out_fmt = DXGI_FORMAT_UNKNOWN;
@@ -665,32 +664,41 @@ bool rt_dbg_ensure(ID3D11Device* device11, ID3D11Texture2D* depth, u32 pw, u32 p
         }
         rt_depth_src = depth;
     }
-    if (rt_s_pos.t11 && rt_pos_w == pw && rt_pos_h == ph && rt_out_w == ow && rt_out_h == oh && rt_out_fmt == ofmt)
+    if (rt_s_z.t11 && rt_pos_w == pw && rt_pos_h == ph && rt_out_w == ow && rt_out_h == oh && rt_out_fmt == ofmt)
         return true;
 
     if (rt_queue && rt_fence_value)
         rt_wait_value(rt_fence_value);
-    rt_rel(rt_pos_uav);
-    if (!rt_make_shared(device11, rt_s_pos, pw, ph, DXGI_FORMAT_R32G32B32A32_FLOAT, "positions") ||
-        !rt_make_shared(device11, rt_s_out, ow, oh, ofmt, "output"))
+    rt_rel(rt_z_uav);
+    rt_rel(rt_z11);
+    // same formats / flags as the DLSS-NR shared textures (known to open in D3D11)
+    if (!rt_make_shared(device11, rt_s_z, pw, ph, DXGI_FORMAT_R32_FLOAT, false, "depth") ||
+        !rt_make_shared(device11, rt_s_out, ow, oh, ofmt, true, "output"))
         return false;
-    D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
-    ud.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-    if (FAILED(device11->CreateUnorderedAccessView(rt_s_pos.t11, &ud, &rt_pos_uav)))
+    D3D11_TEXTURE2D_DESC zd{};
+    zd.Width = pw;
+    zd.Height = ph;
+    zd.MipLevels = 1;
+    zd.ArraySize = 1;
+    zd.Format = DXGI_FORMAT_R32_FLOAT;
+    zd.SampleDesc.Count = 1;
+    zd.Usage = D3D11_USAGE_DEFAULT;
+    zd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device11->CreateTexture2D(&zd, nullptr, &rt_z11)) ||
+        FAILED(device11->CreateUnorderedAccessView(rt_z11, nullptr, &rt_z_uav)))
     {
-        Msg("! [RT] cannot create positions UAV");
+        Msg("! [RT] cannot create depth work texture");
         return false;
     }
 
     const u32 inc = rt_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_CPU_DESCRIPTOR_HANDLE hcpu = rt_heap->GetCPUDescriptorHandleForHeapStart();
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    srv.Format = DXGI_FORMAT_R32_FLOAT;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;
-    rt_dev->CreateShaderResourceView(rt_s_pos.r12, &srv, hcpu);
+    rt_dev->CreateShaderResourceView(rt_s_z.r12, &srv, hcpu);
     hcpu.ptr += inc;
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = ofmt;
@@ -702,7 +710,7 @@ bool rt_dbg_ensure(ID3D11Device* device11, ID3D11Texture2D* depth, u32 pw, u32 p
     rt_out_w = ow;
     rt_out_h = oh;
     rt_out_fmt = ofmt;
-    Msg("* [RT] debug buffers: positions %ux%u, output %ux%u fmt %u", pw, ph, ow, oh, ofmt);
+    Msg("* [RT] debug buffers: depth %ux%u, output %ux%u fmt %u", pw, ph, ow, oh, ofmt);
     return true;
 }
 
@@ -821,9 +829,10 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
         ctx1->CSSetShader(rt_prep_cs, nullptr, 0);
         ctx1->CSSetConstantBuffers(0, 1, &rt_prep_cb);
         ctx1->CSSetShaderResources(0, 1, &rt_depth_srv);
-        ctx1->CSSetUnorderedAccessViews(0, 1, &rt_pos_uav, nullptr);
+        ctx1->CSSetUnorderedAccessViews(0, 1, &rt_z_uav, nullptr);
         ctx1->Dispatch((dd.Width + 7) / 8, (dd.Height + 7) / 8, 1);
         ctx1->ClearState();
+        ctx1->CopyResource(rt_s_z.t11, rt_z11);
         ctx1->CopyResource(rt_s_out.t11, color);
     }
     ctx1->SwapDeviceContextState(engine_state, nullptr);
@@ -852,19 +861,26 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
     tc.cam[1] = Device.vCameraPosition.y;
     tc.cam[2] = Device.vCameraPosition.z;
     tc.bias = ps_r__rt_bias;
-    tc.width = w;
-    tc.height = h;
+    tc.width = dd.Width; // pixel -> NDC mapping is in depth (render) resolution
+    tc.height = dd.Height;
     tc.max_dist = 1000.f;
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            tc.iv[r][c] = pc.inv_view.m[r][c];
+    tc.proj[0] = Device.mProject._11;
+    tc.proj[1] = Device.mProject._22;
+    tc.proj[2] = Device.mProject._31;
+    tc.proj[3] = Device.mProject._32;
 
     const u32 slot = rt_begin_list();
     ID3D12DescriptorHeap* heaps[] = { rt_heap };
     rt_list->SetDescriptorHeaps(1, heaps);
     rt_list->SetComputeRootSignature(rt_rs);
     rt_list->SetPipelineState(rt_pso);
-    rt_list->SetComputeRoot32BitConstants(0, 12, &tc, 0);
+    rt_list->SetComputeRoot32BitConstants(0, 32, &tc, 0);
     rt_list->SetComputeRootShaderResourceView(1, rt_tlas->GetGPUVirtualAddress());
     rt_list->SetComputeRootDescriptorTable(2, rt_heap->GetGPUDescriptorHandleForHeapStart());
-    rt_list->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rt_list->Dispatch((dd.Width + 7) / 8, (dd.Height + 7) / 8, 1);
     const u64 v_done = rt_end_list(slot, v_inputs, false);
 
     // ---- D3D11: wait for the trace on the GPU, take the result ----
