@@ -4,9 +4,11 @@
 // width/height: size of the depth (render resolution); pixels map 1:1 onto the color target's top-left
 // Inputs:  t_z    - view-space depth per pixel (0 = sky, < 0 = HUD), written by D3D11
 //          u_out  - copy of the scene color; overwritten with the debug view
-// Modes:   1 = sun visibility * N.L (grey), 2 = reconstructed normals, 3 = scene darkened where RT shadow
+//          t_n    - G-buffer normal, view space, octahedral-encoded (0,0 = none)
+// Modes:   1 = sun visibility * N.L (grey), 2 = G-buffer normals (world), 3 = scene darkened where RT shadow,
+//          4 = normals reconstructed from depth
 
-#define RS "RootConstants(num32BitConstants=32, b0), SRV(t0), DescriptorTable(SRV(t1), UAV(u0))"
+#define RS "RootConstants(num32BitConstants=32, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0))"
 
 cbuffer C : register(b0)
 {
@@ -27,6 +29,15 @@ cbuffer C : register(b0)
 
 RaytracingAccelerationStructure scene : register(t0);
 Texture2D<float> t_z : register(t1);
+Texture2D<float2> t_n : register(t2);
+
+float3 oct_decode(float2 e)
+{
+    float3 v = float3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0)
+        v.xy = (1.0 - abs(v.yx)) * float2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(v);
+}
 RWTexture2D<float4> u_out : register(u0);
 
 // World position + class (w: 1 = geometry, 0 = sky, 2 = HUD)
@@ -95,10 +106,20 @@ void main(uint3 id : SV_DispatchThreadID)
         n /= nl;
     if (dot(n, to_cam) < 0)
         n = -n;
+    const float3 n_geo = n;
 
-    if (mode == 2)
+    // G-buffer normal (view space -> world) when present: smooth on terrain, sane on foliage
+    const float2 ne = t_n.Load(int3(p, 0));
+    if (dot(ne, ne) > 1e-8)
     {
-        u_out[p] = float4(n * 0.5 + 0.5, 1.0);
+        const float3 nv = oct_decode(ne);
+        n = normalize(nv.x * iv0.xyz + nv.y * iv1.xyz + nv.z * iv2.xyz);
+    }
+
+    if (mode == 2 || mode == 4)
+    {
+        const float3 shown = mode == 2 ? n : n_geo;
+        u_out[p] = float4(shown * 0.5 + 0.5, 1.0);
         return;
     }
 
@@ -109,7 +130,8 @@ void main(uint3 id : SV_DispatchThreadID)
         // Offset grows with distance: reconstructed positions lose precision far away
         const float dist = length(to_cam);
         RayDesc ray;
-        ray.Origin = c.xyz + n * (bias * (1.0 + dist * 0.01)) + sun_dir * 0.01;
+        // offset along the geometric normal: it matches the depth surface the position came from
+        ray.Origin = c.xyz + n_geo * (bias * (1.0 + dist * 0.01)) + sun_dir * 0.01;
         ray.Direction = sun_dir;
         ray.TMin = 0.0;
         ray.TMax = max_dist;

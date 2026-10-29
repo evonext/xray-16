@@ -802,7 +802,7 @@ void xrRender_initconsole()
     CMD4(CCC_Integer, "r__dlss_nr", &ps_r__dlss_nr, 0, 1);
     CMD4(CCC_Integer, "r__dlss_nr_stage", &ps_r__dlss_nr_stage, 0, 1);
     CMD4(CCC_Integer, "r__rt", &ps_r__rt, 0, 1);
-    CMD4(CCC_Integer, "r__rt_debug", &ps_r__rt_debug, 0, 3);
+    CMD4(CCC_Integer, "r__rt_debug", &ps_r__rt_debug, 0, 4);
     CMD4(CCC_Float, "r__rt_bias", &ps_r__rt_bias, 0.f, 1.f);
     CMD4(CCC_Integer, "r__dlss_nr_preset", &ps_r__dlss_nr_preset, 0, 15);
     CMD4(CCC_Float, "r__dlss_nr_intensity", &ps_r__dlss_nr_intensity, 0.f, 2.f);

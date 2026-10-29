@@ -86,12 +86,16 @@ ID3D11ShaderResourceView* rt_depth_srv = nullptr;
 ID3D11Texture2D* rt_depth_src = nullptr; // not owned
 ID3D11Texture2D* rt_z11 = nullptr; // D3D11-only view depth (UAV), copied into the shared one
 ID3D11UnorderedAccessView* rt_z_uav = nullptr;
+ID3D11Texture2D* rt_n11 = nullptr; // D3D11-only encoded normal (UAV), copied into the shared one
+ID3D11UnorderedAccessView* rt_n_uav = nullptr;
+ID3D11ShaderResourceView* rt_gb_srv = nullptr;
+ID3D11Texture2D* rt_gb_src = nullptr; // not owned
 
 ID3D12RootSignature* rt_rs = nullptr;
 ID3D12PipelineState* rt_pso = nullptr;
 ID3D12DescriptorHeap* rt_heap = nullptr;
 
-RtShared rt_s_z, rt_s_out;
+RtShared rt_s_z, rt_s_n, rt_s_out;
 u32 rt_pos_w = 0, rt_pos_h = 0, rt_out_w = 0, rt_out_h = 0;
 DXGI_FORMAT rt_out_fmt = DXGI_FORMAT_UNKNOWN;
 
@@ -100,6 +104,7 @@ struct alignas(16) RtPrepConstants
     Fmatrix inv_view;
     float size_p[4]; // w, h, P11, P22
     float proj[4]; // P31, P32 (as rendered), P33, P43
+    float opt[4]; // x: G-buffer normal packed into rt_Position.xy (gbuffer_opt), y: G-buffer bound
 };
 
 struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (32 dwords)
@@ -117,16 +122,37 @@ struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (32 dwords)
 };
 static_assert(sizeof(RtTraceConstants) == 32 * 4);
 
-// Depth -> view-space z. 0 = sky / far plane, -1 = HUD (weapon, hands)
+// Depth -> view-space z (0 = sky / far plane, -1 = HUD); G-buffer normal -> octahedral encoding
 constexpr const char* RT_PREP_CS = R"(
 cbuffer C : register(b0)
 {
     row_major float4x4 inv_view;
     float4 size_p;
     float4 proj;
+    float4 opt;
 };
 Texture2D<float> t_depth : register(t0);
+Texture2D<float4> t_gb : register(t1);
 RWTexture2D<float> u_z : register(u0);
+RWTexture2D<float2> u_n : register(u1);
+
+float3 gbuf_unpack_normal(float2 norm)
+{
+    float3 res;
+    res.z = norm.x;
+    res.x = (2.0 * abs(norm.y)) - 1.0;
+    res.y = (norm.y < 0.0 ? -1.0 : 1.0) * sqrt(abs(1.0 - res.x * res.x - res.z * res.z));
+    return res;
+}
+
+float2 oct_encode(float3 n)
+{
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    float2 e = n.xy;
+    if (n.z < 0.0)
+        e = (1.0 - abs(n.yx)) * float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return e;
+}
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -140,6 +166,17 @@ void main(uint3 id : SV_DispatchThreadID)
     else if (d < 0.99999)
         z = proj.w / (d - proj.z);
     u_z[id.xy] = z;
+
+    float2 ne = float2(0, 0);
+    if (z > 0.0 && opt.y > 0.5)
+    {
+        float4 g = t_gb.Load(int3(id.xy, 0));
+        float3 n = opt.x > 0.5 ? gbuf_unpack_normal(g.xy) : g.xyz;
+        float l = length(n);
+        if (l > 1e-4)
+            ne = oct_encode(n / l);
+    }
+    u_n[id.xy] = ne;
 }
 )";
 
@@ -581,7 +618,7 @@ bool rt_dbg_init(ID3D11Device* device11, ID3D11DeviceContext1* ctx1)
     }
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 2;
+    hd.NumDescriptors = 3; // t1 depth, t2 normals, u0 output
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(rt_dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&rt_heap))))
         return false;
@@ -640,16 +677,28 @@ void rt_dbg_release_textures()
         rt_wait_value(rt_fence_value);
     rt_rel(rt_z_uav);
     rt_rel(rt_z11);
+    rt_rel(rt_n_uav);
+    rt_rel(rt_n11);
+    rt_rel(rt_gb_srv);
+    rt_gb_src = nullptr;
     rt_rel(rt_depth_srv);
     rt_depth_src = nullptr;
     rt_s_z.release();
+    rt_s_n.release();
     rt_s_out.release();
     rt_pos_w = rt_pos_h = rt_out_w = rt_out_h = 0;
     rt_out_fmt = DXGI_FORMAT_UNKNOWN;
 }
 
-bool rt_dbg_ensure(ID3D11Device* device11, ID3D11Texture2D* depth, u32 pw, u32 ph, u32 ow, u32 oh, DXGI_FORMAT ofmt)
+bool rt_dbg_ensure(ID3D11Device* device11, ID3D11Texture2D* depth, ID3D11Texture2D* gbuf, u32 pw, u32 ph, u32 ow, u32 oh, DXGI_FORMAT ofmt)
 {
+    if (rt_gb_src != gbuf)
+    {
+        rt_rel(rt_gb_srv);
+        if (gbuf && FAILED(device11->CreateShaderResourceView(gbuf, nullptr, &rt_gb_srv)))
+            Msg("! [RT] cannot create G-buffer SRV, using depth normals");
+        rt_gb_src = gbuf; // do not retry every frame
+    }
     if (rt_depth_src != depth)
     {
         rt_rel(rt_depth_srv);
@@ -671,8 +720,11 @@ bool rt_dbg_ensure(ID3D11Device* device11, ID3D11Texture2D* depth, u32 pw, u32 p
         rt_wait_value(rt_fence_value);
     rt_rel(rt_z_uav);
     rt_rel(rt_z11);
+    rt_rel(rt_n_uav);
+    rt_rel(rt_n11);
     // same formats / flags as the DLSS-NR shared textures (known to open in D3D11)
     if (!rt_make_shared(device11, rt_s_z, pw, ph, DXGI_FORMAT_R32_FLOAT, false, "depth") ||
+        !rt_make_shared(device11, rt_s_n, pw, ph, DXGI_FORMAT_R16G16_FLOAT, false, "normals") ||
         !rt_make_shared(device11, rt_s_out, ow, oh, ofmt, true, "output"))
         return false;
     D3D11_TEXTURE2D_DESC zd{};
@@ -690,6 +742,13 @@ bool rt_dbg_ensure(ID3D11Device* device11, ID3D11Texture2D* depth, u32 pw, u32 p
         Msg("! [RT] cannot create depth work texture");
         return false;
     }
+    zd.Format = DXGI_FORMAT_R16G16_FLOAT;
+    if (FAILED(device11->CreateTexture2D(&zd, nullptr, &rt_n11)) ||
+        FAILED(device11->CreateUnorderedAccessView(rt_n11, nullptr, &rt_n_uav)))
+    {
+        Msg("! [RT] cannot create normal work texture");
+        return false;
+    }
 
     const u32 inc = rt_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_CPU_DESCRIPTOR_HANDLE hcpu = rt_heap->GetCPUDescriptorHandleForHeapStart();
@@ -699,6 +758,9 @@ bool rt_dbg_ensure(ID3D11Device* device11, ID3D11Texture2D* depth, u32 pw, u32 p
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;
     rt_dev->CreateShaderResourceView(rt_s_z.r12, &srv, hcpu);
+    hcpu.ptr += inc;
+    srv.Format = DXGI_FORMAT_R16G16_FLOAT;
+    rt_dev->CreateShaderResourceView(rt_s_n.r12, &srv, hcpu);
     hcpu.ptr += inc;
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = ofmt;
@@ -773,7 +835,8 @@ void Tick(ID3D11Device* device11)
     rt_built_tris = nt;
 }
 
-bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth)
+bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed)
 {
     if (!ps_r__rt || !ps_r__rt_debug || !rt_ok || !rt_tlas || !color || !depth || !ctx1)
         return false;
@@ -798,7 +861,14 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
         warned = true;
         return false;
     }
-    if (!rt_dbg_ensure(device11, depth, dd.Width, dd.Height, cd.Width, cd.Height, cd.Format))
+    if (gbuffer)
+    {
+        D3D11_TEXTURE2D_DESC gd;
+        gbuffer->GetDesc(&gd);
+        if (gd.Width != dd.Width || gd.Height != dd.Height || gd.SampleDesc.Count > 1)
+            gbuffer = nullptr;
+    }
+    if (!rt_dbg_ensure(device11, depth, gbuffer, dd.Width, dd.Height, cd.Width, cd.Height, cd.Format))
     {
         rt_dbg_release_textures();
         rt_dbg_ok = false;
@@ -817,6 +887,9 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
     pc.proj[1] = Device.mProject._32;
     pc.proj[2] = Device.mProject._33;
     pc.proj[3] = Device.mProject._43;
+    pc.opt[0] = gbuffer_packed ? 1.f : 0.f;
+    pc.opt[1] = rt_gb_srv ? 1.f : 0.f;
+    pc.opt[2] = pc.opt[3] = 0.f;
 
     ID3DDeviceContextState* engine_state = nullptr;
     ctx1->SwapDeviceContextState(rt_state11, &engine_state);
@@ -828,11 +901,14 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
         ctx1->Unmap(rt_prep_cb, 0);
         ctx1->CSSetShader(rt_prep_cs, nullptr, 0);
         ctx1->CSSetConstantBuffers(0, 1, &rt_prep_cb);
-        ctx1->CSSetShaderResources(0, 1, &rt_depth_srv);
-        ctx1->CSSetUnorderedAccessViews(0, 1, &rt_z_uav, nullptr);
+        ID3D11ShaderResourceView* srvs[2] = { rt_depth_srv, rt_gb_srv };
+        ID3D11UnorderedAccessView* uavs[2] = { rt_z_uav, rt_n_uav };
+        ctx1->CSSetShaderResources(0, 2, srvs);
+        ctx1->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
         ctx1->Dispatch((dd.Width + 7) / 8, (dd.Height + 7) / 8, 1);
         ctx1->ClearState();
         ctx1->CopyResource(rt_s_z.t11, rt_z11);
+        ctx1->CopyResource(rt_s_n.t11, rt_n11);
         ctx1->CopyResource(rt_s_out.t11, color);
     }
     ctx1->SwapDeviceContextState(engine_state, nullptr);
