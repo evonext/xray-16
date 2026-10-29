@@ -404,7 +404,8 @@ void NextJitter(u32 width, u32 height, u32 outWidth, Fvector2& outPx, Fvector2& 
     outNdc.y = -2.f * outPx.y / float(height);
 }
 
-bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInputs& in)
+bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInputs& in,
+    const std::function<void()>& beforeUpscale)
 {
     if (!g_available || !ctx1 || !in.color || !in.depth || !in.width || !in.height || !in.outWidth || !in.outHeight)
         return false;
@@ -458,6 +459,15 @@ bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInput
         ctx1->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
         ctx1->Dispatch((in.width + 7) / 8, (in.height + 7) / 8, 1);
         ctx1->ClearState();
+
+        if (beforeUpscale)
+        {
+            // guides are ready: hand the context back to the engine state for the callback
+            g_last_reset = reset;
+            ctx1->SwapDeviceContextState(engine_state, nullptr);
+            beforeUpscale();
+            ctx1->SwapDeviceContextState(g_state, nullptr);
+        }
 
         if (!ensure_feature(ctx1, in))
             break;

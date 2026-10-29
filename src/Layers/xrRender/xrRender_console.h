@@ -70,6 +70,7 @@ extern ECORE_API int ps_r__dlss_preset;
 extern ECORE_API u32 ps_r__dlss_mode;
 extern ECORE_API const xr_token qdlss_mode_token[];
 extern ECORE_API int ps_r__dlss_nr;
+extern ECORE_API int ps_r__dlss_nr_stage; // 0 = after DLSS (output res), 1 = before upscale (render res)
 extern ECORE_API int ps_r__dlss_nr_preset;
 extern ECORE_API float ps_r__dlss_nr_intensity;
 extern ECORE_API float ps_r__dlss_nr_global_tone;

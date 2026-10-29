@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 // NVIDIA DLSS (NGX, D3D11) integration for the R4 renderer.
 // DLAA (native resolution) and DLSS Super Resolution (scene rendered at lower resolution,
 // upscaled before post-process and UI). Camera motion vectors are reconstructed from depth.
@@ -34,7 +36,10 @@ struct FrameInputs
 bool Enabled(ID3D11Device* device);
 
 // Runs DLSS on inputs.color in place. Returns false if nothing was done.
-bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInputs& in);
+// beforeUpscale: optional callback run after the guides (motion vectors, depth) are built and
+// before DLSS itself, with the engine's context state active (used for DLSS-NR at render resolution).
+bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInputs& in,
+    const std::function<void()>& beforeUpscale = {});
 
 // Computes jitter for the next frame (pixels and NDC). Zero if disabled.
 // width/height = render resolution, outWidth = output width (affects the number of jitter phases).

@@ -456,9 +456,22 @@ void CRenderTarget::phase_combine()
         in.jitterNdc = Device.mProjectJitterApplied;
         in.jitterPx.set(Device.mProjectJitterApplied.x * float(in.width) * 0.5f,
             -Device.mProjectJitterApplied.y * float(in.height) * 0.5f);
-        dlss_done = dlss::Evaluate(HW.pDevice, HW.pContext1, in);
-        // DLSS 5 neural rendering on the full-resolution anti-aliased image
-        if (dlss_done && ps_r__dlss_nr)
+        // DLSS 5 neural rendering: either on the render-resolution scene before the upscale
+        // (r__dlss_nr_stage 1) or on the full-resolution anti-aliased image after it (0)
+        const bool nr_before = ps_r__dlss_nr && ps_r__dlss_nr_stage == 1;
+        std::function<void()> nr_pre;
+        if (nr_before)
+        {
+            nr_pre = [&in]()
+            {
+                PIX_EVENT(DLSS_NR_PRE);
+                dlss::EvaluateNR(HW.pDevice, in.ctx, in.color, in.width, in.height);
+            };
+        }
+        dlss_done = dlss::Evaluate(HW.pDevice, HW.pContext1, in, nr_pre);
+        if (nr_before)
+            RCache.Invalidate();
+        if (dlss_done && ps_r__dlss_nr && !nr_before)
         {
             PIX_EVENT(DLSS_NR);
             ID3D11Texture2D* full = in.output ? in.output : in.color;
