@@ -434,7 +434,11 @@ void CRenderTarget::phase_combine()
 #if defined(XR_DLSS)
     // Ray tracing: keep the level BVH in sync with the loaded level (r__rt)
     if (!_menu_pp)
+    {
         rt::Tick(HW.pDevice);
+        if (!RImplementation.o.msaa)
+            rt::DebugPass(HW.pDevice, HW.pContext1, rt_Color->pSurface, rt_Base_Depth->pSurface);
+    }
 
     // DLSS: scene color is in rt_Color here; post-process and UI come after
     bool dlss_redirected = false;
