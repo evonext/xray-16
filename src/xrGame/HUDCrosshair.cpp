@@ -29,7 +29,11 @@ void CHUDCrosshair::SetDispersion(float disp)
 {
     Fvector4 r;
     Fvector R = {VIEWPORT_NEAR * _sin(disp), 0.f, VIEWPORT_NEAR};
-    Device.mProject.transform(r, R);
+    // the sub-pixel DLSS jitter must not change the crosshair size
+    Fmatrix proj_nj = Device.mProject;
+    proj_nj._31 -= Device.mProjectJitterApplied.x;
+    proj_nj._32 -= Device.mProjectJitterApplied.y;
+    proj_nj.transform(r, R);
 
     Fvector2 scr_size{ float(Device.dwWidth), float(Device.dwHeight) };
     float radius_pixels = _abs(r.x) * scr_size.x / 2.0f;

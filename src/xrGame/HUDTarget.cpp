@@ -141,7 +141,13 @@ void CHUDTarget::Render()
     Fvector p2;
     p2.mad(p1, dir, PP.RQ.range);
     Fvector4 pt;
-    Device.mFullTransform.transform(pt, p2);
+    // unjittered transform: the DLSS sub-pixel jitter would make the crosshair tremble
+    Fmatrix proj_nj = Device.mProject;
+    proj_nj._31 -= Device.mProjectJitterApplied.x;
+    proj_nj._32 -= Device.mProjectJitterApplied.y;
+    Fmatrix full_nj;
+    full_nj.mul(proj_nj, Device.mView);
+    full_nj.transform(pt, p2);
     pt.y = -pt.y;
     float di_size = C_SIZE / powf(pt.w, .2f);
 
