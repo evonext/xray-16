@@ -349,6 +349,11 @@ void CRender::Render()
 
     r_rain.sync();
 
+#if defined(XR_DLSS)
+    // Ray traced sun visibility (r__rt_sun): must be ready before the cascades are accumulated in r_sun.sync()
+    Target->rt_sun_mask_update();
+#endif
+
     // Directional light - fucking sun
     {
         PIX_EVENT(DEFER_SUN);

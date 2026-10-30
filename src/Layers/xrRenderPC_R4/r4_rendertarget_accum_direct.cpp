@@ -262,6 +262,9 @@ void CRenderTarget::accum_direct(CBackend& cmd_list, u32 sub_phase)
         cmd_list.set_c("Ldynamic_color", L_clr.x, L_clr.y, L_clr.z, L_spec);
         cmd_list.set_c("m_shadow", m_shadow);
         cmd_list.set_c("m_sunmask", m_clouds_shadow);
+#if defined(XR_DLSS)
+        cmd_list.set_c("rtsun_k", rt_sun_valid ? 1.f : 0.f, 0.f, 0.f, 0.f); // sun visibility from ray tracing
+#endif
 
         // nv-DBT
         float zMin, zMax;
@@ -627,6 +630,9 @@ void CRenderTarget::accum_direct_cascade(CBackend& cmd_list, u32 sub_phase, Fmat
         cmd_list.set_c("Ldynamic_color", L_clr.x, L_clr.y, L_clr.z, L_spec);
         cmd_list.set_c("m_shadow", m_shadow);
         cmd_list.set_c("m_sunmask", m_clouds_shadow);
+#if defined(XR_DLSS)
+        cmd_list.set_c("rtsun_k", rt_sun_valid ? 1.f : 0.f, 0.f, 0.f, 0.f); // sun visibility from ray tracing
+#endif
 
         // Pass view vector projected in shadow space to far pixel shader
         // Needed for shadow fading.

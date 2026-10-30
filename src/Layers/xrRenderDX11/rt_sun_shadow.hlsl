@@ -6,7 +6,7 @@
 //          u_out  - copy of the scene color; overwritten with the debug view
 //          t_n    - G-buffer normal, view space, octahedral-encoded (0,0 = none)
 // Modes:   1 = sun visibility * N.L (grey), 2 = G-buffer normals (world), 3 = scene darkened where RT shadow,
-//          4 = normals reconstructed from depth
+//          4 = normals reconstructed from depth, 5 = sun visibility only (R8 mask for the sun shader: 1 lit, 0 shadow)
 
 #define RS "RootConstants(num32BitConstants=32, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0))"
 
@@ -82,12 +82,23 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     const int2 p = int2(id.xy);
     const float4 c = load_pos(p);
-    const float4 scene_col = u_out[p];
+    float4 scene_col = float4(0, 0, 0, 1);
+    if (mode != 5)
+        scene_col = u_out[p];
 
     if (abs(c.w - 2.0) < 0.01)
+    {
+        if (mode == 5)
+            u_out[p] = float4(1, 1, 1, 1);
         return; // HUD: keep as is
+    }
     if (c.w < 0.5)
     {
+        if (mode == 5)
+        {
+            u_out[p] = float4(1, 1, 1, 1);
+            return;
+        }
         if (mode == 1)
             u_out[p] = float4(0.35, 0.5, 0.75, 1.0); // sky
         else if (mode == 2)
@@ -125,7 +136,8 @@ void main(uint3 id : SV_DispatchThreadID)
 
     const float ndl = dot(n, sun_dir);
     float lit = 0.0;
-    if (ndl > 0.0)
+    // mode 5 traces every pixel: the sun shader applies N.L / translucency itself
+    if (ndl > 0.0 || mode == 5)
     {
         // Offset grows with distance: reconstructed positions lose precision far away
         const float dist = length(to_cam);
@@ -141,6 +153,11 @@ void main(uint3 id : SV_DispatchThreadID)
         lit = (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0 : 1.0;
     }
 
+    if (mode == 5)
+    {
+        u_out[p] = float4(lit, lit, lit, lit);
+        return;
+    }
     if (mode == 1)
     {
         const float v = 0.08 + 0.92 * lit * saturate(ndl);

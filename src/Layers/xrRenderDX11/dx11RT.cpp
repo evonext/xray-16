@@ -1065,10 +1065,11 @@ void Tick(ID3D11Device* device11)
     }
 }
 
-bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
-    ID3D11Texture2D* gbuffer, bool gbuffer_packed)
+// color: scene color (debug views) or, with mask_only, the R8 sun-visibility target (sized like the depth)
+static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool mask_only)
 {
-    if (!ps_r__rt || !ps_r__rt_debug || !rt_ok || !rt_tlas || !color || !depth || !ctx1)
+    if (!ps_r__rt || !rt_ok || !rt_tlas || !color || !depth || !ctx1)
         return false;
     if (!rt_dbg_tried)
     {
@@ -1097,6 +1098,15 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
         gbuffer->GetDesc(&gd);
         if (gd.Width != dd.Width || gd.Height != dd.Height || gd.SampleDesc.Count > 1)
             gbuffer = nullptr;
+    }
+    if (mask_only && (cd.Width != dd.Width || cd.Height != dd.Height || cd.Format != DXGI_FORMAT_R8_UNORM))
+    {
+        static bool warned = false;
+        if (!warned)
+            Msg("! [RT] sun mask target mismatch: %ux%u fmt %u vs depth %ux%u", cd.Width, cd.Height, cd.Format,
+                dd.Width, dd.Height);
+        warned = true;
+        return false;
     }
     if (!rt_dbg_ensure(device11, depth, gbuffer, dd.Width, dd.Height, cd.Width, cd.Height, cd.Format))
     {
@@ -1139,7 +1149,8 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
         ctx1->ClearState();
         ctx1->CopyResource(rt_s_z.t11, rt_z11);
         ctx1->CopyResource(rt_s_n.t11, rt_n11);
-        ctx1->CopyResource(rt_s_out.t11, color);
+        if (!mask_only)
+            ctx1->CopyResource(rt_s_out.t11, color);
     }
     ctx1->SwapDeviceContextState(engine_state, nullptr);
     rt_rel(engine_state);
@@ -1162,7 +1173,7 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
     tc.sun[0] = sun.x;
     tc.sun[1] = sun.y;
     tc.sun[2] = sun.z;
-    tc.mode = u32(ps_r__rt_debug);
+    tc.mode = mask_only ? 5u : u32(ps_r__rt_debug);
     tc.cam[0] = Device.vCameraPosition.x;
     tc.cam[1] = Device.vCameraPosition.y;
     tc.cam[2] = Device.vCameraPosition.z;
@@ -1197,9 +1208,26 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
     if (!logged)
     {
         logged = true;
-        Msg("* [RT] first debug frame: %ux%u, sun dir (%.2f %.2f %.2f)", w, h, sun.x, sun.y, sun.z);
+        Msg("* [RT] first %s frame: %ux%u, sun dir (%.2f %.2f %.2f)", mask_only ? "sun mask" : "debug", w, h, sun.x,
+            sun.y, sun.z);
     }
     return true;
+}
+
+bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed)
+{
+    if (!ps_r__rt_debug)
+        return false;
+    return RunPass(device11, ctx1, color, depth, gbuffer, gbuffer_packed, false);
+}
+
+bool SunMask(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* mask, ID3D11Texture2D* depth,
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed)
+{
+    if (!ps_r__rt_sun || ps_r__rt_debug)
+        return false; // debug views use the shared output buffer in another format
+    return RunPass(device11, ctx1, mask, depth, gbuffer, gbuffer_packed, true);
 }
 
 void OnLevelUnload()

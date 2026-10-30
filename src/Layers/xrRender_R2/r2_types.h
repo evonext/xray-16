@@ -15,6 +15,7 @@ namespace xray::render::RENDER_NAMESPACE
 
 // other
 #define     r2_RT_accum         "$user$accum"       // --- 16 bit fp or 16 bit fx
+#define     r2_RT_rtsun         "$user$rtsun"       // --- R8, ray traced sun visibility (r__rt_sun)
 #define     r2_RT_accum_temp    "$user$accum_temp"  // --- 16 bit fp - only for HW which doesn't feature fp16 blend
 
 #define     r2_T_envs0          "$user$env_s0"

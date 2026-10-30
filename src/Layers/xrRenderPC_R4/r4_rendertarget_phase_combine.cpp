@@ -709,4 +709,17 @@ void CRenderTarget::phase_combine_volumetric()
     }
     RCache.set_ColorWriteEnable();
 }
+#if defined(XR_DLSS)
+void CRenderTarget::rt_sun_mask_update()
+{
+    rt_sun_valid = false;
+    if (!ps_r__rt_sun || RImplementation.o.msaa || !rt_RTSun._get() || !rt_RTSun->pSurface)
+        return;
+    const bool packed = RImplementation.o.gbuffer_opt;
+    const ref_rt& gb = packed ? rt_Position : rt_Normal;
+    rt_sun_valid = rt::SunMask(HW.pDevice, HW.pContext1, rt_RTSun->pSurface, rt_Base_Depth->pSurface,
+        (gb._get() && gb->pSurface) ? gb->pSurface : nullptr, packed);
+}
+#endif
+
 } // namespace xray::render::RENDER_NAMESPACE
