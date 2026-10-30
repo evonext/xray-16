@@ -25,6 +25,7 @@ void CBlender_combine::Compile(CBlender_Compile& C)
         C.r_Sampler_rtf("s_tonemap", r2_RT_luminance_cur);
         C.r_Sampler_clw("s_material", r2_material);
         C.r_Sampler_clw("s_occ", r2_RT_ssao_temp);
+        C.r_dx11Texture("s_rtsun", r2_RT_rtsun);
         C.r_Sampler_rtf("s_half_depth", r2_RT_half_depth);
         C.r_Sampler_clf("env_s0", r2_T_envs0);
         C.r_Sampler_clf("env_s1", r2_T_envs1);
@@ -93,6 +94,7 @@ void CBlender_combine::Compile(CBlender_Compile& C)
         C.r_Sampler_clf("sky_s0", r2_T_sky0);
         C.r_Sampler_clf("sky_s1", r2_T_sky1);
         C.r_Sampler_rtf("s_occ", r2_RT_ssao_temp);
+        C.r_dx11Texture("s_rtsun", r2_RT_rtsun);
         C.r_Sampler_rtf("s_half_depth", r2_RT_half_depth);
 
         jitter(C);
@@ -172,6 +174,7 @@ void CBlender_combine::Compile(CBlender_Compile& C)
         C.r_dx11Texture("sky_s0", r2_T_sky0);
         C.r_dx11Texture("sky_s1", r2_T_sky1);
         C.r_dx11Texture("s_occ", r2_RT_ssao_temp);
+        C.r_dx11Texture("s_rtsun", r2_RT_rtsun);
         C.r_dx11Texture("s_half_depth", r2_RT_half_depth);
 
         jitter(C);
@@ -291,6 +294,7 @@ void CBlender_combine_msaa::Compile(CBlender_Compile& C)
         C.r_Sampler_clf("sky_s0", r2_T_sky0);
         C.r_Sampler_clf("sky_s1", r2_T_sky1);
         C.r_Sampler_rtf("s_occ", r2_RT_ssao_temp);
+        C.r_dx11Texture("s_rtsun", r2_RT_rtsun);
         C.r_Sampler_rtf("s_half_depth", r2_RT_half_depth);
 
         jitter(C);
@@ -366,6 +370,7 @@ void CBlender_combine_msaa::Compile(CBlender_Compile& C)
         C.r_dx11Texture("s_tonemap", r2_RT_luminance_cur);
         C.r_dx11Texture("s_material", r2_material);
         C.r_dx11Texture("s_occ", r2_RT_ssao_temp);
+        C.r_dx11Texture("s_rtsun", r2_RT_rtsun);
         C.r_dx11Texture("s_half_depth", r2_RT_half_depth);
         C.r_dx11Texture("env_s0", r2_T_envs0);
         C.r_dx11Texture("env_s1", r2_T_envs1);

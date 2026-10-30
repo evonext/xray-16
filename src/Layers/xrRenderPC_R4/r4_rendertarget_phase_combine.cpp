@@ -205,6 +205,9 @@ void CRenderTarget::phase_combine()
         RCache.set_Geometry(g_combine);
 
         RCache.set_c("m_v2w", Device.mInvView);
+#if defined(XR_DLSS)
+        RCache.set_c("rtao_k", rt_ao_valid ? ps_r__rt_ao_k : 0.f, 0.f, 0.f, 0.f); // ray traced AO strength
+#endif
         RCache.set_c("L_ambient", ambclr);
 
         RCache.set_c("Ldynamic_color", sunclr);
@@ -713,12 +716,15 @@ void CRenderTarget::phase_combine_volumetric()
 void CRenderTarget::rt_sun_mask_update()
 {
     rt_sun_valid = false;
-    if (!ps_r__rt_sun || RImplementation.o.msaa || !rt_RTSun._get() || !rt_RTSun->pSurface)
+    rt_ao_valid = false;
+    if ((!ps_r__rt_sun && !ps_r__rt_ao) || RImplementation.o.msaa || !rt_RTSun._get() || !rt_RTSun->pSurface)
         return;
     const bool packed = RImplementation.o.gbuffer_opt;
     const ref_rt& gb = packed ? rt_Position : rt_Normal;
-    rt_sun_valid = rt::SunMask(HW.pDevice, HW.pContext1, rt_RTSun->pSurface, rt_Base_Depth->pSurface,
+    const bool ok = rt::SunMask(HW.pDevice, HW.pContext1, rt_RTSun->pSurface, rt_Base_Depth->pSurface,
         (gb._get() && gb->pSurface) ? gb->pSurface : nullptr, packed);
+    rt_sun_valid = ok && ps_r__rt_sun;
+    rt_ao_valid = ok && ps_r__rt_ao;
 }
 #endif
 

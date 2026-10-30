@@ -126,7 +126,7 @@ struct alignas(16) RtPrepConstants
     float opt[4]; // x: G-buffer normal packed into rt_Position.xy (gbuffer_opt), y: G-buffer bound
 };
 
-struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (32 dwords)
+struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (40 dwords)
 {
     float sun[3];
     u32 mode;
@@ -138,8 +138,10 @@ struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (32 dwords)
     float alpha_thr; // > 0: alpha-tested geometry present, hits with a lower alpha are ignored
     float iv[4][4]; // inverse view rows
     float proj[4]; // P11, P22, P31, P32
+    float ex0[4]; // frame, sun disk tan(half-angle), sun rays, AO rays
+    float ex1[4]; // AO radius, flags (bit0 sun, bit1 AO)
 };
-static_assert(sizeof(RtTraceConstants) == 32 * 4);
+static_assert(sizeof(RtTraceConstants) == 40 * 4);
 
 // Depth -> view-space z (0 = sky / far plane, -1 = HUD); G-buffer normal -> octahedral encoding
 constexpr const char* RT_PREP_CS = R"(
@@ -1608,7 +1610,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
         if (gd.Width != dd.Width || gd.Height != dd.Height || gd.SampleDesc.Count > 1)
             gbuffer = nullptr;
     }
-    if (mask_only && (cd.Width != dd.Width || cd.Height != dd.Height || cd.Format != DXGI_FORMAT_R8_UNORM))
+    if (mask_only && (cd.Width != dd.Width || cd.Height != dd.Height || cd.Format != DXGI_FORMAT_R16G16_UNORM))
     {
         static bool warned = false;
         if (!warned)
@@ -1698,13 +1700,20 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     tc.proj[1] = Device.mProject._22;
     tc.proj[2] = Device.mProject._31;
     tc.proj[3] = Device.mProject._32;
+    static u32 s_frame = 0;
+    tc.ex0[0] = float(++s_frame & 0xFFFF);
+    tc.ex0[1] = ps_r__rt_sun_size;
+    tc.ex0[2] = float(ps_r__rt_sun_rays);
+    tc.ex0[3] = float(ps_r__rt_ao_rays);
+    tc.ex1[0] = ps_r__rt_ao_radius;
+    tc.ex1[1] = float((ps_r__rt_sun ? 1 : 0) | (ps_r__rt_ao ? 2 : 0));
 
     const u32 slot = rt_begin_list();
     ID3D12DescriptorHeap* heaps[] = { rt_heap };
     rt_list->SetDescriptorHeaps(1, heaps);
     rt_list->SetComputeRootSignature(rt_rs);
     rt_list->SetPipelineState(rt_pso);
-    rt_list->SetComputeRoot32BitConstants(0, 32, &tc, 0);
+    rt_list->SetComputeRoot32BitConstants(0, 40, &tc, 0);
     rt_list->SetComputeRootShaderResourceView(1, rt_tlas->GetGPUVirtualAddress());
     rt_list->SetComputeRootDescriptorTable(2, rt_heap->GetGPUDescriptorHandleForHeapStart());
     {
@@ -1740,7 +1749,7 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
 bool SunMask(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* mask, ID3D11Texture2D* depth,
     ID3D11Texture2D* gbuffer, bool gbuffer_packed)
 {
-    if (!ps_r__rt_sun || ps_r__rt_debug)
+    if ((!ps_r__rt_sun && !ps_r__rt_ao) || ps_r__rt_debug)
         return false; // debug views use the shared output buffer in another format
     return RunPass(device11, ctx1, mask, depth, gbuffer, gbuffer_packed, true);
 }

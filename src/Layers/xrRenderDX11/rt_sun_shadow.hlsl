@@ -8,7 +8,7 @@
 // Modes:   1 = sun visibility * N.L (grey), 2 = G-buffer normals (world), 3 = scene darkened where RT shadow,
 //          4 = normals reconstructed from depth, 5 = sun visibility only (R8 mask for the sun shader: 1 lit, 0 shadow)
 
-#define RS "RootConstants(num32BitConstants=32, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0)), DescriptorTable(SRV(t3, numDescriptors=4)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT, addressU=TEXTURE_ADDRESS_WRAP, addressV=TEXTURE_ADDRESS_WRAP, addressW=TEXTURE_ADDRESS_WRAP)"
+#define RS "RootConstants(num32BitConstants=40, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0)), DescriptorTable(SRV(t3, numDescriptors=4)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT, addressU=TEXTURE_ADDRESS_WRAP, addressV=TEXTURE_ADDRESS_WRAP, addressW=TEXTURE_ADDRESS_WRAP)"
 
 cbuffer C : register(b0)
 {
@@ -25,6 +25,8 @@ cbuffer C : register(b0)
     float4 iv2;
     float4 iv3;
     float4 proj; // P11, P22, P31, P32 (as rendered)
+    float4 ex0; // x: frame, y: sun disk tan(half-angle), z: sun rays, w: AO rays
+    float4 ex1; // x: AO radius (m), y: flags (bit0: sun, bit1: AO), z/w: unused
 };
 
 RaytracingAccelerationStructure scene : register(t0);
@@ -79,7 +81,7 @@ float3 pick_delta(float4 c, float4 a, float4 b)
 }
 
 // 1 = the sun is visible from origin along dir, 0 = blocked (opaque hit, or an alpha-tested hit that passes the test)
-float trace_sun(float3 origin, float3 dir, float tmax)
+float trace_sun(float3 origin, float3 dir, float tmax, out float hit_t)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -117,7 +119,28 @@ float trace_sun(float3 origin, float3 dir, float tmax)
             break;
         }
     }
-    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
+    hit_t = tmax;
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+    {
+        hit_t = q.CommittedRayT();
+        return 0.0;
+    }
+    return 1.0;
+}
+
+float ign(float2 p, float frame)
+{
+    p += 5.588238 * frame;
+    return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));
+}
+
+void make_onb(float3 n, out float3 t, out float3 b)
+{
+    const float sgn = n.z >= 0.0 ? 1.0 : -1.0;
+    const float a = -1.0 / (sgn + n.z);
+    const float k = n.x * n.y * a;
+    t = float3(1.0 + sgn * n.x * n.x * a, sgn * k, -sgn * n.x);
+    b = float3(k, sgn + n.y * n.y * a, -n.y);
 }
 
 [RootSignature(RS)]
@@ -137,14 +160,14 @@ void main(uint3 id : SV_DispatchThreadID)
     if (abs(c.w - 2.0) < 0.01)
     {
         if (mode == 5)
-            u_out[p] = float4(1, 1, 1, 1);
+            u_out[p] = float4(1, 1, 0, 0);
         return; // HUD: keep as is
     }
     if (c.w < 0.5)
     {
         if (mode == 5)
         {
-            u_out[p] = float4(1, 1, 1, 1);
+            u_out[p] = float4(1, 1, 0, 0);
             return;
         }
         if (mode == 1)
@@ -184,20 +207,57 @@ void main(uint3 id : SV_DispatchThreadID)
 
     const float ndl = dot(n, sun_dir);
     float lit = 0.0;
-    // mode 5 traces every pixel: the sun shader applies N.L / translucency itself
-    if (ndl > 0.0 || mode == 5)
-    {
-        // Offset grows with distance: reconstructed positions lose precision far away
-        const float dist = length(to_cam);
-        // offset along the geometric normal: it matches the depth surface the position came from
-        lit = trace_sun(c.xyz + n_geo * (bias * (1.0 + dist * 0.01)) + sun_dir * 0.01, sun_dir, max_dist);
-    }
-
+    float ao = 1.0;
+    const uint flags = uint(ex1.y);
+    const float dist = length(to_cam);
+    // Offset grows with distance: reconstructed positions lose precision far away
+    const float3 org = c.xyz + n_geo * (bias * (1.0 + dist * 0.01));
+    const float rnd = ign(float2(p), ex0.x);
+    float ht;
     if (mode == 5)
     {
-        u_out[p] = float4(lit, lit, lit, lit);
+        // soft sun: rays spread over the sun disk (contact-hardening penumbra comes for free)
+        lit = 1.0;
+        if (flags & 1u)
+        {
+            const uint ns = max(1u, uint(ex0.z));
+            float3 st, sb;
+            make_onb(sun_dir, st, sb);
+            float acc = 0.0;
+            for (uint i = 0; i < ns; ++i)
+            {
+                const float r = sqrt((float(i) + 0.5) / float(ns));
+                const float th = float(i) * 2.39996323 + rnd * 6.2831853;
+                const float3 d = normalize(sun_dir + (st * cos(th) + sb * sin(th)) * (r * ex0.y));
+                acc += trace_sun(org + d * 0.01, d, max_dist, ht);
+            }
+            lit = acc / float(ns);
+        }
+        if (flags & 2u)
+        {
+            // AO: cosine-weighted hemisphere around the smooth normal, hits weighted by proximity
+            const uint na = max(1u, uint(ex0.w));
+            float3 at, ab;
+            make_onb(n, at, ab);
+            float occ = 0.0;
+            for (uint j = 0; j < na; ++j)
+            {
+                const float u1 = (float(j) + frac(rnd * 7.31 + float(j) * 0.618034)) / float(na);
+                const float u2 = frac(rnd + float(j) * 0.754877666);
+                const float r = sqrt(u1);
+                const float th = 6.2831853 * u2;
+                const float3 d = at * (r * cos(th)) + ab * (r * sin(th)) + n * sqrt(max(0.0, 1.0 - u1));
+                const float vis = trace_sun(org + n * 0.02, d, ex1.x, ht);
+                occ += (1.0 - vis) * saturate(1.0 - ht / ex1.x);
+            }
+            ao = 1.0 - occ / float(na);
+        }
+        u_out[p] = float4(lit, ao, 0.0, 0.0);
         return;
     }
+    if (ndl > 0.0)
+        lit = trace_sun(org + sun_dir * 0.01, sun_dir, max_dist, ht);
+
     if (mode == 1)
     {
         const float v = 0.08 + 0.92 * lit * saturate(ndl);

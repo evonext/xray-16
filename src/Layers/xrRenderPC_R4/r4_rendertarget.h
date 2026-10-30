@@ -57,6 +57,7 @@ public:
     ref_rt rt_Base_Depth_scene; // render-resolution depth (scene)
     ref_rt rt_DLSS_Out; // upscaled color, read by post-process instead of rt_Color
     ref_rt rt_RTSun; // R8, ray traced sun visibility (1 lit), read by the sun shader
+    bool rt_ao_valid{}; // rt_RTSun.g holds this frame's ambient occlusion
     bool rt_sun_valid{}; // rt_RTSun holds this frame's mask
     void rt_sun_mask_update();
     ref_rt rt_Generic_0_full, rt_Generic_1_full; // output-resolution targets for the main menu over a level

@@ -73,6 +73,12 @@ extern ECORE_API int ps_r__dlss_nr;
 extern ECORE_API int ps_r__rt; // ray tracing: build the level BVH (stage 1)
 extern ECORE_API int ps_r__rt_debug; // 0 off, 1 sun visibility, 2 G-buffer normals, 3 scene with RT shadow, 4 depth normals
 extern ECORE_API float ps_r__rt_aref; // alpha threshold of the ray traced alpha test (foliage)
+extern ECORE_API int ps_r__rt_ao; // 1 = ray traced ambient occlusion (hemi ambient in combine)
+extern ECORE_API int ps_r__rt_ao_rays;
+extern ECORE_API float ps_r__rt_ao_radius;
+extern ECORE_API float ps_r__rt_ao_k;
+extern ECORE_API int ps_r__rt_sun_rays; // rays per pixel over the sun disk
+extern ECORE_API float ps_r__rt_sun_size; // tan of the sun disk half-angle (penumbra width)
 extern ECORE_API int ps_r__rt_sun; // 1 = sun shadows from ray tracing (replaces the shadow map)
 extern ECORE_API int ps_r__rt_geom; // 0 collision mesh, 1 visible level geometry (render meshes)
 extern ECORE_API float ps_r__rt_bias; // normal offset of shadow ray origins (m)
