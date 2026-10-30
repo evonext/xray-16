@@ -326,6 +326,14 @@ public:
 };
 //-AVO
 
+// r__shot: takes a screenshot of the base render target into $screenshots$ (debug automation)
+class CCC_rt_shot : public IConsole_Command
+{
+public:
+    CCC_rt_shot(pcstr N) : IConsole_Command(N) { bEmptyArgsHandled = true; }
+    void Execute(pcstr /*args*/) override { GEnv.Render->Screenshot(); }
+};
+
 class CCC_tf_Aniso : public CCC_Integer
 {
 public:
@@ -801,6 +809,7 @@ void xrRender_initconsole()
     CMD3(CCC_Token, "r__dlss_mode", &ps_r__dlss_mode, qdlss_mode_token);
     CMD4(CCC_Integer, "r__dlss_nr", &ps_r__dlss_nr, 0, 1);
     CMD4(CCC_Integer, "r__dlss_nr_stage", &ps_r__dlss_nr_stage, 0, 1);
+    CMD1(CCC_rt_shot, "r__shot");
     CMD4(CCC_Integer, "r__rt", &ps_r__rt, 0, 1);
     CMD4(CCC_Integer, "r__rt_debug", &ps_r__rt_debug, 0, 4);
     CMD4(CCC_Float, "r__rt_bias", &ps_r__rt_bias, 0.f, 1.f);
