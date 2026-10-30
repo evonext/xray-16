@@ -24,6 +24,8 @@ public:
     virtual void Load(const char* N, IReader* data, u32 dwFlags);
     virtual void Copy(dxRender_Visual* pFrom);
     virtual void Release();
+    // index range of the most detailed level of detail (offset from iBase, triangle count)
+    void GetMaxLod(u32& offset, u32& tris) const;
 
 private:
     FProgressive(const FProgressive& other);

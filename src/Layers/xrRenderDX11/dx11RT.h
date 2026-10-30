@@ -9,6 +9,7 @@
 //   r__rt        0/1     build the level BVH (released when switched off)
 //   r__rt_debug  0..4    debug view: 1 sun visibility * N.L, 2 G-buffer normals, 3 scene darkened by RT shadow,
 //                        4 normals from depth
+//   r__rt_geom   0/1     BVH source: 0 collision mesh, 1 visible level geometry (level.geom)
 //   r__rt_bias   0..1    normal offset of shadow ray origins, meters
 
 namespace xray::render::RENDER_NAMESPACE

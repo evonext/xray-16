@@ -67,6 +67,20 @@ void FProgressive::Load(const char* N, IReader* data, u32 dwFlags)
 #endif
 }
 
+void FProgressive::GetMaxLod(u32& offset, u32& tris) const
+{
+    if (nSWI.sw && nSWI.count)
+    {
+        offset = nSWI.sw[0].offset;
+        tris = nSWI.sw[0].num_tris;
+    }
+    else
+    {
+        offset = 0;
+        tris = dwPrimitives;
+    }
+}
+
 void FProgressive::Render(CBackend& cmd_list, float LOD, bool use_fast_geo)
 {
 #if RENDER != R_R1

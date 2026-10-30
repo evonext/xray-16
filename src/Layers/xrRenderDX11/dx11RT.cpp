@@ -9,6 +9,12 @@
 #include "xrEngine/IGame_Persistent.h"
 #include "xrEngine/Environment.h"
 #include "xrCDB/xr_area.h"
+#include "xrCore/FMesh.hpp"
+#include "xrCore/stream_reader.h"
+#include "Common/LevelStructure.hpp"
+#include "Layers/xrRender/BufferUtils.h"
+#include "Layers/xrRender/FHierrarhyVisual.h"
+#include "Layers/xrRender/FProgressive.h"
 
 #include <d3d11_4.h>
 #include <d3d12.h>
@@ -59,8 +65,10 @@ u64 rt_fence_value = 0;
 // Acceleration structures of the current level
 ID3D12Resource* rt_blas = nullptr;
 ID3D12Resource* rt_tlas = nullptr;
-const CDB::MODEL* rt_built_model = nullptr; // what the BVH was built from
+const CDB::MODEL* rt_built_model = nullptr; // what the BVH was built from (collision mode)
 u32 rt_built_tris = 0;
+u64 rt_built_key = 0; // level / geometry mode the BVH was built for
+bool rt_built_any = false;
 bool rt_build_failed = false; // do not retry every frame for the same model
 
 // ---- debug pass state ----
@@ -324,18 +332,193 @@ void rt_release_as()
         rt_wait_value(rt_fence_value);
     rt_rel(rt_tlas);
     rt_rel(rt_blas);
-    if (rt_built_model)
+    if (rt_built_any)
         Msg("* [RT] BVH released");
+    rt_built_any = false;
+    rt_built_key = 0;
     rt_built_model = nullptr;
     rt_built_tris = 0;
 }
 
-bool rt_build(const CDB::MODEL& model)
+
+// Visible level geometry: the meshes the renderer draws (level.geom), not the coarse collision model.
+// Static visuals are stored in world space. Alpha-tested materials (foliage cards, fences) and trees are skipped
+// for now: they would cast solid shadows.
+struct RtMesh
 {
-    const u32 nv = model.get_verts_count();
-    const u32 nt = model.get_tris_count();
-    const Fvector* verts = model.get_verts();
-    const CDB::TRI* tris = model.get_tris();
+    xr_vector<Fvector> v;
+    xr_vector<u32> i;
+    u32 visuals{};
+    u32 skipped_aref{};
+    u32 skipped_other{};
+};
+
+struct RtGeomVB
+{
+    xr_vector<u8> data;
+    u32 stride{};
+    u32 count{};
+    bool pos_ok{};
+};
+
+bool rt_collect_visuals(RtMesh& out)
+{
+    CRender& r = RImplementation;
+    if (r.Visuals.empty() || r.nVB.empty() || r.nIB.empty())
+        return false;
+
+    CStreamReader* geom = FS.rs_open("$level$", "level.geom");
+    if (!geom)
+    {
+        Msg("! [RT] level.geom not found");
+        return false;
+    }
+
+    // vertex positions and indices straight from the level file (the engine keeps them only on the GPU)
+    xr_vector<RtGeomVB> vbs;
+    xr_vector<xr_vector<u16>> ibs;
+    {
+        CStreamReader* fs = geom->open_chunk(fsL_VB);
+        if (!fs)
+        {
+            FS.r_close(geom);
+            return false;
+        }
+        const u32 count = fs->r_u32();
+        vbs.resize(count);
+        constexpr size_t buffer_size = (MAXD3DDECLLENGTH + 1) * sizeof(VertexElement);
+        for (u32 n = 0; n < count; ++n)
+        {
+            VertexElement dcl[MAXD3DDECLLENGTH + 1];
+            fs->r(dcl, buffer_size);
+            fs->advance(-int(buffer_size));
+            const u32 dcl_len = GetDeclLength(dcl) + 1;
+            fs->advance(int(dcl_len * sizeof(VertexElement)));
+
+            const u32 vcount = fs->r_u32();
+            const u32 vsize = GetDeclVertexSize(dcl, 0);
+            RtGeomVB& g = vbs[n];
+            g.stride = vsize;
+            g.count = vcount;
+            // position must be the first element: float3 at offset 0
+            g.pos_ok = dcl[0].Stream == 0 && dcl[0].Offset == 0 && dcl[0].Type == D3DDECLTYPE_FLOAT3 &&
+                dcl[0].Usage == D3DDECLUSAGE_POSITION;
+            g.data.resize(size_t(vcount) * vsize);
+            fs->r(g.data.data(), g.data.size());
+        }
+        fs->close();
+
+        fs = geom->open_chunk(fsL_IB);
+        if (!fs)
+        {
+            FS.r_close(geom);
+            return false;
+        }
+        const u32 icount = fs->r_u32();
+        ibs.resize(icount);
+        for (u32 n = 0; n < icount; ++n)
+        {
+            const u32 c = fs->r_u32();
+            ibs[n].resize(c);
+            fs->r(ibs[n].data(), size_t(c) * sizeof(u16));
+        }
+        fs->close();
+    }
+    FS.r_close(geom);
+
+    auto add = [&](Fvisual* f, u32 idx_first, u32 tris)
+    {
+        const ptrdiff_t vid = f->p_rm_Vertices - r.nVB.data();
+        const ptrdiff_t iid = f->p_rm_Indices - r.nIB.data();
+        if (vid < 0 || iid < 0 || size_t(vid) >= vbs.size() || size_t(iid) >= ibs.size())
+        {
+            ++out.skipped_other;
+            return;
+        }
+        const RtGeomVB& vb = vbs[vid];
+        const xr_vector<u16>& ib = ibs[iid];
+        if (!vb.pos_ok || size_t(f->vBase) + f->vCount > vb.count || size_t(idx_first) + size_t(tris) * 3 > ib.size())
+        {
+            ++out.skipped_other;
+            return;
+        }
+        const u32 base = u32(out.v.size());
+        out.v.reserve(out.v.size() + f->vCount);
+        for (u32 k = 0; k < f->vCount; ++k)
+        {
+            Fvector p;
+            CopyMemory(&p, vb.data.data() + size_t(f->vBase + k) * vb.stride, sizeof(Fvector));
+            out.v.push_back(p);
+        }
+        out.i.reserve(out.i.size() + size_t(tris) * 3);
+        for (u32 k = 0; k < tris * 3; ++k)
+        {
+            const u32 ix = ib[idx_first + k];
+            out.i.push_back(ix < f->vCount ? base + ix : base);
+        }
+        ++out.visuals;
+    };
+
+    auto visit = [&](auto&& self, dxRender_Visual* v) -> void
+    {
+        if (!v)
+            return;
+        if (v->Type == MT_HIERRARHY)
+        {
+            for (dxRender_Visual* c : static_cast<FHierrarhyVisual*>(v)->children)
+                self(self, c);
+            return;
+        }
+        if (v->Type != MT_NORMAL && v->Type != MT_PROGRESSIVE)
+        {
+            ++out.skipped_other; // trees, skinned, LOD billboards, ...
+            return;
+        }
+        Fvisual* f = static_cast<Fvisual*>(v);
+        if (!f->p_rm_Vertices || !f->p_rm_Indices)
+            return;
+
+        // deferred shader of the material: alpha-tested pixel shaders carry "aref" in the name
+        bool aref = false, drawn = true;
+        if (Shader* sh = f->shader._get())
+        {
+            ShaderElement* e = sh->E[0]._get();
+            if (!e || e->passes.empty())
+                drawn = false; // no deferred pass: glass, particles, ...
+            else if (e->passes[0]->ps)
+            {
+                const char* n = e->passes[0]->ps->cName.c_str();
+                aref = n && strstr(n, "aref");
+            }
+        }
+        if (!drawn)
+        {
+            ++out.skipped_other;
+            return;
+        }
+        if (aref)
+        {
+            ++out.skipped_aref;
+            return;
+        }
+
+        if (v->Type == MT_PROGRESSIVE)
+        {
+            u32 off = 0, tris = 0;
+            static_cast<FProgressive*>(v)->GetMaxLod(off, tris);
+            add(f, f->iBase + off, tris);
+        }
+        else
+            add(f, f->iBase, f->dwPrimitives);
+    };
+
+    for (dxRender_Visual* v : r.Visuals)
+        visit(visit, v);
+    return !out.i.empty();
+}
+
+bool rt_build(const Fvector* verts, u32 nv, const u32* tris, u32 nt)
+{
     if (!nv || !nt || !verts || !tris)
     {
         Msg("! [RT] level static geometry is empty");
@@ -386,7 +569,7 @@ bool rt_build(const CDB::MODEL& model)
     {
         for (u32 k = 0; k < 3; ++k)
         {
-            u32 v = tris[i].verts[k];
+            u32 v = tris[i * 3 + k];
             if (v >= nv)
             {
                 v = 0;
@@ -798,7 +981,7 @@ void Tick(ID3D11Device* device11)
 {
     if (!ps_r__rt)
     {
-        if (rt_built_model)
+        if (rt_built_any)
             rt_release_as();
         rt_build_failed = false;
         return;
@@ -813,16 +996,52 @@ void Tick(ID3D11Device* device11)
     if (!rt_ok || !g_pGameLevel)
         return;
 
-    const CDB::MODEL* model = g_pGameLevel->ObjectSpace.GetStaticModel();
-    const u32 nt = model ? u32(model->get_tris_count()) : 0;
-    if (!nt)
-        return;
-    if (model == rt_built_model && nt == rt_built_tris)
-        return;
-    model->syncronize(); // collision model may still be building on another thread
-
-    rt_release_as();
-    if (rt_build(*model))
+    const bool use_visuals = ps_r__rt_geom != 0;
+    bool ok;
+    if (use_visuals)
+    {
+        CRender& r = RImplementation;
+        if (r.Visuals.empty() || r.nVB.empty())
+            return; // level geometry not loaded yet
+        const u64 key = (u64(reinterpret_cast<uintptr_t>(g_pGameLevel)) * 31u) ^ (u64(r.Visuals.size()) << 1) ^ 1u;
+        if (rt_built_any && key == rt_built_key)
+            return;
+        rt_release_as();
+        RtMesh mesh;
+        CTimer t;
+        t.Start();
+        const bool got = rt_collect_visuals(mesh);
+        Msg("* [RT] visible geometry: %u visuals, %u tris, %u verts (skipped: %u alpha-tested, %u other), %u ms",
+            mesh.visuals, u32(mesh.i.size() / 3), u32(mesh.v.size()), mesh.skipped_aref, mesh.skipped_other,
+            u32(t.GetElapsed_ms()));
+        ok = got && rt_build(mesh.v.data(), u32(mesh.v.size()), mesh.i.data(), u32(mesh.i.size() / 3));
+        rt_built_key = key;
+        rt_built_any = true;
+    }
+    else
+    {
+        const CDB::MODEL* model = g_pGameLevel->ObjectSpace.GetStaticModel();
+        const u32 nt = model ? u32(model->get_tris_count()) : 0;
+        if (!nt)
+            return;
+        const u64 key = (u64(reinterpret_cast<uintptr_t>(model)) * 31u) ^ (u64(nt) << 1);
+        if (rt_built_any && key == rt_built_key)
+            return;
+        model->syncronize(); // collision model may still be building on another thread
+        rt_release_as();
+        const u32 nv = u32(model->get_verts_count());
+        xr_vector<u32> idx(size_t(nt) * 3);
+        const CDB::TRI* tris = model->get_tris();
+        for (u32 i = 0; i < nt; ++i)
+            for (u32 k = 0; k < 3; ++k)
+                idx[size_t(i) * 3 + k] = tris[i].verts[k];
+        ok = rt_build(model->get_verts(), nv, idx.data(), nt);
+        rt_built_key = key;
+        rt_built_any = true;
+        rt_built_model = model;
+        rt_built_tris = nt;
+    }
+    if (ok)
         rt_build_failed = false;
     else
     {
@@ -831,8 +1050,6 @@ void Tick(ID3D11Device* device11)
         rt_rel(rt_blas);
         rt_rel(rt_tlas);
     }
-    rt_built_model = model;
-    rt_built_tris = nt;
 }
 
 bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
