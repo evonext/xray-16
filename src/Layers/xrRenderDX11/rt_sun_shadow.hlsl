@@ -8,7 +8,7 @@
 // Modes:   1 = sun visibility * N.L (grey), 2 = G-buffer normals (world), 3 = scene darkened where RT shadow,
 //          4 = normals reconstructed from depth, 5 = sun visibility only (R8 mask for the sun shader: 1 lit, 0 shadow)
 
-#define RS "RootConstants(num32BitConstants=32, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0))"
+#define RS "RootConstants(num32BitConstants=32, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0)), DescriptorTable(SRV(t3, numDescriptors=4)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT, addressU=TEXTURE_ADDRESS_WRAP, addressV=TEXTURE_ADDRESS_WRAP, addressW=TEXTURE_ADDRESS_WRAP)"
 
 cbuffer C : register(b0)
 {
@@ -19,7 +19,7 @@ cbuffer C : register(b0)
     uint width;
     uint height;
     float max_dist;
-    float pad;
+    float alpha_thr; // > 0: alpha-tested geometry (foliage) is traced; hits with a lower texture alpha are skipped
     float4 iv0; // inverse view, rows (row-vector convention), xyz used
     float4 iv1;
     float4 iv2;
@@ -30,6 +30,12 @@ cbuffer C : register(b0)
 RaytracingAccelerationStructure scene : register(t0);
 Texture2D<float> t_z : register(t1);
 Texture2D<float2> t_n : register(t2);
+// alpha-tested geometry (second BLAS, non-opaque): UVs, indices and texture slice per triangle, alpha masks
+Texture2DArray<float> t_alpha : register(t3);
+ByteAddressBuffer b_uv : register(t4);
+ByteAddressBuffer b_idx : register(t5);
+ByteAddressBuffer b_slice : register(t6);
+SamplerState smp : register(s0);
 
 float3 oct_decode(float2 e)
 {
@@ -70,6 +76,48 @@ float3 pick_delta(float4 c, float4 a, float4 b)
     if (vb)
         return db;
     return float3(0, 0, 0);
+}
+
+// 1 = the sun is visible from origin along dir, 0 = blocked (opaque hit, or an alpha-tested hit that passes the test)
+float trace_sun(float3 origin, float3 dir, float tmax)
+{
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = 0.0;
+    ray.TMax = tmax;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
+    while (q.Proceed())
+    {
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE_HIT)
+        {
+            bool hit = true;
+            if (alpha_thr > 0.0)
+            {
+                const uint tri = q.CandidatePrimitiveIndex();
+                const uint slice = b_slice.Load(tri * 4);
+                if (slice != 0xFFFFFFFFu)
+                {
+                    const uint3 ix = b_idx.Load3(tri * 12);
+                    const float2 uv0 = asfloat(b_uv.Load2(ix.x * 8));
+                    const float2 uv1 = asfloat(b_uv.Load2(ix.y * 8));
+                    const float2 uv2 = asfloat(b_uv.Load2(ix.z * 8));
+                    const float2 bc = q.CandidateTriangleBarycentrics();
+                    const float2 uv = uv0 * (1.0 - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y;
+                    hit = t_alpha.SampleLevel(smp, float3(uv, float(slice)), 0) >= alpha_thr;
+                }
+            }
+            if (hit)
+                q.CommitNonOpaqueTriangleHit();
+        }
+        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+        {
+            q.Abort();
+            break;
+        }
+    }
+    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
 }
 
 [RootSignature(RS)]
@@ -141,16 +189,8 @@ void main(uint3 id : SV_DispatchThreadID)
     {
         // Offset grows with distance: reconstructed positions lose precision far away
         const float dist = length(to_cam);
-        RayDesc ray;
         // offset along the geometric normal: it matches the depth surface the position came from
-        ray.Origin = c.xyz + n_geo * (bias * (1.0 + dist * 0.01)) + sun_dir * 0.01;
-        ray.Direction = sun_dir;
-        ray.TMin = 0.0;
-        ray.TMax = max_dist;
-        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-        q.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
-        q.Proceed();
-        lit = (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0 : 1.0;
+        lit = trace_sun(c.xyz + n_geo * (bias * (1.0 + dist * 0.01)) + sun_dir * 0.01, sun_dir, max_dist);
     }
 
     if (mode == 5)

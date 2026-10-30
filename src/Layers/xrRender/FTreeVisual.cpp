@@ -223,6 +223,22 @@ void FTreeVisual_PM::Load(const char* N, IReader* data, u32 dwFlags)
         pSWI = RImplementation.getSWI(ID);
     }
 }
+void FTreeVisual_PM::GetMaxLod(u32& offset, u32& tris, u32& verts) const
+{
+    if (pSWI && pSWI->count)
+    {
+        offset = pSWI->sw[0].offset;
+        tris = pSWI->sw[0].num_tris;
+        verts = pSWI->sw[0].num_verts;
+    }
+    else
+    {
+        offset = 0;
+        tris = dwPrimitives;
+        verts = vCount;
+    }
+}
+
 void FTreeVisual_PM::Render(CBackend& cmd_list, float LOD, bool use_fast_geo)
 {
     inherited::Render(cmd_list, LOD, use_fast_geo);

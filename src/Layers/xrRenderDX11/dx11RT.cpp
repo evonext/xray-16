@@ -15,6 +15,7 @@
 #include "Layers/xrRender/BufferUtils.h"
 #include "Layers/xrRender/FHierrarhyVisual.h"
 #include "Layers/xrRender/FProgressive.h"
+#include "Layers/xrRender/FTreeVisual.h"
 
 #include <d3d11_4.h>
 #include <d3d12.h>
@@ -63,8 +64,13 @@ HANDLE rt_event = nullptr;
 u64 rt_fence_value = 0;
 
 // Acceleration structures of the current level
-ID3D12Resource* rt_blas = nullptr;
+ID3D12Resource* rt_blas = nullptr; // opaque geometry
+ID3D12Resource* rt_blas_a = nullptr; // alpha-tested geometry (foliage, trees): non-opaque, any-hit in the shader
 ID3D12Resource* rt_tlas = nullptr;
+ID3D12Resource* rt_a_uv = nullptr; // float2 per vertex of the alpha BLAS (raw SRV)
+ID3D12Resource* rt_a_idx = nullptr; // u32 per index
+ID3D12Resource* rt_a_slice = nullptr; // u32 per triangle: slice of the alpha texture array
+u32 rt_a_tris = 0;
 const CDB::MODEL* rt_built_model = nullptr; // what the BVH was built from (collision mode)
 u32 rt_built_tris = 0;
 u64 rt_built_key = 0; // level / geometry mode the BVH was built for
@@ -104,6 +110,11 @@ ID3D12PipelineState* rt_pso = nullptr;
 ID3D12DescriptorHeap* rt_heap = nullptr;
 
 RtShared rt_s_z, rt_s_n, rt_s_out;
+RtShared rt_s_alpha; // R8 array: alpha channel of the base texture of every alpha-tested material (any-hit)
+u32 rt_alpha_slices = 0;
+u32 rt_alpha_size = 0;
+void rt_alpha_release();
+void rt_write_alpha_descs();
 u32 rt_pos_w = 0, rt_pos_h = 0, rt_out_w = 0, rt_out_h = 0;
 DXGI_FORMAT rt_out_fmt = DXGI_FORMAT_UNKNOWN;
 
@@ -124,7 +135,7 @@ struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (32 dwords)
     u32 width;
     u32 height;
     float max_dist;
-    float pad;
+    float alpha_thr; // > 0: alpha-tested geometry present, hits with a lower alpha are ignored
     float iv[4][4]; // inverse view rows
     float proj[4]; // P11, P22, P31, P32
 };
@@ -332,6 +343,12 @@ void rt_release_as()
         rt_wait_value(rt_fence_value);
     rt_rel(rt_tlas);
     rt_rel(rt_blas);
+    rt_rel(rt_blas_a);
+    rt_rel(rt_a_uv);
+    rt_rel(rt_a_idx);
+    rt_rel(rt_a_slice);
+    rt_a_tris = 0;
+    rt_alpha_release();
     if (rt_built_any)
         Msg("* [RT] BVH released");
     rt_built_any = false;
@@ -342,15 +359,36 @@ void rt_release_as()
 
 
 // Visible level geometry: the meshes the renderer draws (level.geom), not the coarse collision model.
-// Static visuals are stored in world space. Alpha-tested materials (foliage cards, fences) and trees are skipped
-// for now: they would cast solid shadows.
+// Static visuals are stored in world space; trees carry a per-instance transform. Opaque meshes go into the first
+// BLAS, alpha-tested ones (foliage, trees, fences) into a second BLAS together with UVs and a texture slice per
+// triangle, so the shader can run the alpha test on hits.
 struct RtMesh
 {
+    // opaque
     xr_vector<Fvector> v;
     xr_vector<u32> i;
+    // alpha-tested
+    xr_vector<Fvector> av;
+    xr_vector<Fvector2> auv;
+    xr_vector<u32> ai;
+    xr_vector<u32> aslice; // per triangle: index into tex, or RT_NO_SLICE (treated as opaque)
+    xr_vector<CTexture*> tex;
     u32 visuals{};
-    u32 skipped_aref{};
+    u32 alpha_visuals{};
+    u32 trees{};
     u32 skipped_other{};
+    u32 tex_missing{};
+};
+
+constexpr u32 RT_NO_SLICE = 0xFFFFFFFFu;
+
+enum RtVT : int
+{
+    RTVT_NONE = 0,
+    RTVT_F3,
+    RTVT_S4,
+    RTVT_S2,
+    RTVT_F2
 };
 
 struct RtGeomVB
@@ -358,8 +396,33 @@ struct RtGeomVB
     xr_vector<u8> data;
     u32 stride{};
     u32 count{};
-    bool pos_ok{};
+    int pos_type{RTVT_NONE};
+    u32 pos_off{};
+    int tc_type{RTVT_NONE};
+    u32 tc_off{};
+    int tan_a{-1}; // byte offset of the tangent / binormal D3DCOLOR alpha (sub-texel offset of the static tc)
+    int bin_a{-1};
 };
+
+CTexture* rt_base_texture(dxRender_Visual* v)
+{
+    Shader* sh = v->shader._get();
+    if (!sh)
+        return nullptr;
+    ShaderElement* e = sh->E[0]._get();
+    if (!e || e->passes.empty())
+        return nullptr;
+    SPass* p = e->passes[0]._get();
+    if (!p)
+        return nullptr;
+    STextureList* T = p->T._get();
+    if (!T)
+        return nullptr;
+    for (auto& pr : *T)
+        if (pr.second._get())
+            return pr.second._get();
+    return nullptr;
+}
 
 bool rt_collect_visuals(RtMesh& out)
 {
@@ -376,7 +439,7 @@ bool rt_collect_visuals(RtMesh& out)
         return false;
     }
 
-    // vertex positions and indices straight from the level file (the engine keeps them only on the GPU)
+    // vertices and indices straight from the level file (the engine keeps them only on the GPU)
     xr_vector<RtGeomVB> vbs;
     xr_vector<xr_vector<u16>> ibs;
     {
@@ -396,7 +459,8 @@ bool rt_collect_visuals(RtMesh& out)
             VertexElement dcl[MAXD3DDECLLENGTH + 1];
             fs->r(dcl, buffer_size);
             fs->advance(-int(buffer_size));
-            const u32 dcl_len = GetDeclLength(dcl) + 1;
+            const u32 decl_elems = GetDeclLength(dcl);
+            const u32 dcl_len = decl_elems + 1;
             fs->advance(int(dcl_len * sizeof(VertexElement)));
 
             const u32 vcount = fs->r_u32();
@@ -404,9 +468,27 @@ bool rt_collect_visuals(RtMesh& out)
             RtGeomVB& g = vbs[n];
             g.stride = vsize;
             g.count = vcount;
-            // position must be the first element: float3 at offset 0
-            g.pos_ok = dcl[0].Stream == 0 && dcl[0].Offset == 0 && dcl[0].Type == D3DDECLTYPE_FLOAT3 &&
-                dcl[0].Usage == D3DDECLUSAGE_POSITION;
+            for (u32 k = 0; k < decl_elems; ++k)
+            {
+                const VertexElement& e = dcl[k];
+                if (e.Stream != 0)
+                    continue;
+                if (e.Usage == D3DDECLUSAGE_POSITION && e.UsageIndex == 0)
+                {
+                    g.pos_off = e.Offset;
+                    g.pos_type = e.Type == D3DDECLTYPE_FLOAT3 ? RTVT_F3 : e.Type == D3DDECLTYPE_SHORT4 ? RTVT_S4 : RTVT_NONE;
+                }
+                else if (e.Usage == D3DDECLUSAGE_TEXCOORD && e.UsageIndex == 0)
+                {
+                    g.tc_off = e.Offset;
+                    g.tc_type = e.Type == D3DDECLTYPE_SHORT2 ? RTVT_S2 : e.Type == D3DDECLTYPE_SHORT4 ? RTVT_S4 :
+                        e.Type == D3DDECLTYPE_FLOAT2 ? RTVT_F2 : RTVT_NONE;
+                }
+                else if (e.Usage == D3DDECLUSAGE_TANGENT && e.Type == D3DDECLTYPE_D3DCOLOR)
+                    g.tan_a = int(e.Offset) + 3;
+                else if (e.Usage == D3DDECLUSAGE_BINORMAL && e.Type == D3DDECLTYPE_D3DCOLOR)
+                    g.bin_a = int(e.Offset) + 3;
+            }
             g.data.resize(size_t(vcount) * vsize);
             fs->r(g.data.data(), g.data.size());
         }
@@ -437,11 +519,73 @@ bool rt_collect_visuals(RtMesh& out)
     // exact-size reserve() per visual would reallocate (and copy) the whole array 20k times: reserve once
     out.v.reserve(size_t(8) << 20);
     out.i.reserve(size_t(24) << 20);
+    out.av.reserve(size_t(2) << 20);
+    out.auv.reserve(size_t(2) << 20);
+    out.ai.reserve(size_t(6) << 20);
+    out.aslice.reserve(size_t(2) << 20);
 
-    auto add = [&](Fvisual* f, u32 idx_first, u32 tris)
+    xr_map<CTexture*, u32> tex_slice;
+
+    // tree: tc = raw * 1/quant; static: (raw + (T.a, B.a)/255) * 32/32768
+    auto decode_uv = [&](const RtGeomVB& vb, u32 index, bool tree) -> Fvector2
     {
-        const ptrdiff_t vid = f->p_rm_Vertices - r.nVB.data();
-        const ptrdiff_t iid = f->p_rm_Indices - r.nIB.data();
+        const u8* b = vb.data.data() + size_t(index) * vb.stride;
+        float u = 0.f, v = 0.f;
+        if (vb.tc_type == RTVT_S2 || vb.tc_type == RTVT_S4)
+        {
+            const s16* s = reinterpret_cast<const s16*>(b + vb.tc_off);
+            u = float(s[0]);
+            v = float(s[1]);
+            if (tree)
+            {
+                const float k = 1.f / float(FTreeVisual_quant);
+                u *= k;
+                v *= k;
+            }
+            else
+            {
+                const float du = vb.tan_a >= 0 ? float(b[vb.tan_a]) / 255.f : 0.f;
+                const float dv = vb.bin_a >= 0 ? float(b[vb.bin_a]) / 255.f : 0.f;
+                u = (u + du) * (32.f / 32768.f);
+                v = (v + dv) * (32.f / 32768.f);
+            }
+        }
+        else if (vb.tc_type == RTVT_F2)
+        {
+            const float* f = reinterpret_cast<const float*>(b + vb.tc_off);
+            u = f[0];
+            v = f[1];
+        }
+        Fvector2 r2;
+        r2.set(u, v);
+        return r2;
+    };
+    auto decode_pos = [&](const RtGeomVB& vb, u32 index, const Fmatrix* xf) -> Fvector
+    {
+        const u8* b = vb.data.data() + size_t(index) * vb.stride + vb.pos_off;
+        Fvector p;
+        if (vb.pos_type == RTVT_F3)
+            CopyMemory(&p, b, sizeof(Fvector));
+        else
+        {
+            const s16* s = reinterpret_cast<const s16*>(b);
+            p.set(float(s[0]), float(s[1]), float(s[2]));
+        }
+        if (xf)
+        {
+            Fvector w;
+            xf->transform_tiny(w, p);
+            return w;
+        }
+        return p;
+    };
+
+    // mesh: vertex / index ranges of the visual; xf: tree transform (null for static geometry); alpha: base texture
+    auto add = [&](dxRender_Visual* vis, IRender_Mesh* m, u32 idx_first, u32 tris, u32 vcount, const Fmatrix* xf,
+                   bool tree, bool alpha)
+    {
+        const ptrdiff_t vid = m->p_rm_Vertices - r.nVB.data();
+        const ptrdiff_t iid = m->p_rm_Indices - r.nIB.data();
         if (vid < 0 || iid < 0 || size_t(vid) >= vbs.size() || size_t(iid) >= ibs.size())
         {
             ++out.skipped_other;
@@ -449,24 +593,75 @@ bool rt_collect_visuals(RtMesh& out)
         }
         const RtGeomVB& vb = vbs[vid];
         const xr_vector<u16>& ib = ibs[iid];
-        if (!vb.pos_ok || size_t(f->vBase) + f->vCount > vb.count || size_t(idx_first) + size_t(tris) * 3 > ib.size())
+        if (vb.pos_type == RTVT_NONE || size_t(m->vBase) + vcount > vb.count || size_t(idx_first) + size_t(tris) * 3 > ib.size())
         {
             ++out.skipped_other;
             return;
         }
-        const u32 base = u32(out.v.size());
-        for (u32 k = 0; k < f->vCount; ++k)
+        if (alpha && vb.tc_type == RTVT_NONE)
         {
-            Fvector p;
-            CopyMemory(&p, vb.data.data() + size_t(f->vBase + k) * vb.stride, sizeof(Fvector));
-            out.v.push_back(p);
+            ++out.skipped_other;
+            return;
+        }
+        if (!alpha && vb.pos_type != RTVT_F3)
+        {
+            ++out.skipped_other; // opaque geometry is always float3 world-space in the level file
+            return;
+        }
+
+        if (!alpha)
+        {
+            const u32 base = u32(out.v.size());
+            for (u32 k = 0; k < vcount; ++k)
+                out.v.push_back(decode_pos(vb, m->vBase + k, nullptr));
+            for (u32 k = 0; k < tris * 3; ++k)
+            {
+                const u32 ix = ib[idx_first + k];
+                out.i.push_back(ix < vcount ? base + ix : base);
+            }
+            ++out.visuals;
+            return;
+        }
+
+        u32 slice = RT_NO_SLICE;
+        if (CTexture* t = rt_base_texture(vis))
+        {
+            if (!t->isUser())
+            {
+                auto it = tex_slice.find(t);
+                if (it != tex_slice.end())
+                    slice = it->second;
+                else
+                {
+                    if (!t->get_SRView())
+                        t->Load();
+                    if (t->get_SRView())
+                    {
+                        slice = u32(out.tex.size());
+                        tex_slice[t] = slice;
+                        out.tex.push_back(t);
+                    }
+                    else
+                        ++out.tex_missing;
+                }
+            }
+        }
+        const u32 base = u32(out.av.size());
+        for (u32 k = 0; k < vcount; ++k)
+        {
+            out.av.push_back(decode_pos(vb, m->vBase + k, xf));
+            out.auv.push_back(decode_uv(vb, m->vBase + k, tree));
         }
         for (u32 k = 0; k < tris * 3; ++k)
         {
             const u32 ix = ib[idx_first + k];
-            out.i.push_back(ix < f->vCount ? base + ix : base);
+            out.ai.push_back(ix < vcount ? base + ix : base);
         }
-        ++out.visuals;
+        for (u32 k = 0; k < tris; ++k)
+            out.aslice.push_back(slice);
+        ++out.alpha_visuals;
+        if (tree)
+            ++out.trees;
     };
 
     auto visit = [&](auto&& self, dxRender_Visual* v) -> void
@@ -479,9 +674,27 @@ bool rt_collect_visuals(RtMesh& out)
                 self(self, c);
             return;
         }
+
+        if (v->Type == MT_TREE_ST || v->Type == MT_TREE_PM)
+        {
+            FTreeVisual* t = static_cast<FTreeVisual*>(v);
+            IRender_Mesh* m = t;
+            if (!m->p_rm_Vertices || !m->p_rm_Indices)
+                return;
+            if (v->Type == MT_TREE_PM)
+            {
+                u32 off = 0, tris = 0, verts = 0;
+                static_cast<FTreeVisual_PM*>(v)->GetMaxLod(off, tris, verts);
+                add(v, m, m->iBase + off, tris, m->vCount, &t->GetXform(), true, true);
+            }
+            else
+                add(v, m, m->iBase, m->dwPrimitives, m->vCount, &t->GetXform(), true, true);
+            return;
+        }
+
         if (v->Type != MT_NORMAL && v->Type != MT_PROGRESSIVE)
         {
-            ++out.skipped_other; // trees, skinned, LOD billboards, ...
+            ++out.skipped_other; // skinned, LOD billboards, ...
             return;
         }
         Fvisual* f = static_cast<Fvisual*>(v);
@@ -506,49 +719,66 @@ bool rt_collect_visuals(RtMesh& out)
             ++out.skipped_other;
             return;
         }
-        if (aref)
-        {
-            ++out.skipped_aref;
-            return;
-        }
 
         if (v->Type == MT_PROGRESSIVE)
         {
             u32 off = 0, tris = 0;
             static_cast<FProgressive*>(v)->GetMaxLod(off, tris);
-            add(f, f->iBase + off, tris);
+            add(v, f, f->iBase + off, tris, f->vCount, nullptr, false, aref);
         }
         else
-            add(f, f->iBase, f->dwPrimitives);
+            add(v, f, f->iBase, f->dwPrimitives, f->vCount, nullptr, false, aref);
     };
 
     for (dxRender_Visual* v : r.Visuals)
         visit(visit, v);
     Msg("* [RT] visuals collected");
     FlushLog();
-    return !out.i.empty();
+    return !out.i.empty() || !out.ai.empty();
 }
 
-bool rt_build(const Fvector* verts, u32 nv, const u32* tris, u32 nt)
+// Copy of CPU data into a default-heap buffer (readable by the compute shader as a raw SRV)
+ID3D12Resource* rt_default_buffer(const void* data, u64 size)
 {
-    if (!nv || !nt || !verts || !tris)
+    ID3D12Resource* up = rt_buffer(size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+    ID3D12Resource* dst = rt_buffer(size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    if (!up || !dst)
     {
-        Msg("! [RT] level static geometry is empty");
-        return false;
+        rt_rel(up);
+        rt_rel(dst);
+        return nullptr;
     }
+    void* p = nullptr;
+    D3D12_RANGE no_read{ 0, 0 };
+    up->Map(0, &no_read, &p);
+    CopyMemory(p, data, size_t(size));
+    up->Unmap(0, nullptr);
+    const u32 slot = rt_begin_list();
+    rt_list->CopyBufferRegion(dst, 0, up, 0, size);
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = dst;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    rt_list->ResourceBarrier(1, &b);
+    rt_end_list(slot, 0, true);
+    up->Release();
+    return dst;
+}
 
-    CTimer timer;
-    timer.Start();
-
-    // Everything the build allocates; released on every exit path
-    ID3D12Resource *vb = nullptr, *ib = nullptr, *scratch = nullptr, *inst_buf = nullptr, *blas_full = nullptr,
-                   *post = nullptr, *readback = nullptr, *blas_compact = nullptr;
+// BLAS over an indexed triangle list, built with compaction; returns the final (compacted) structure.
+// opaque: geometry flag OPAQUE (no any-hit); alpha-tested geometry is built non-opaque.
+ID3D12Resource* rt_build_blas(const Fvector* verts, u32 nv, const u32* tris, u32 nt, bool opaque, u64& full_size,
+    Fbox& bb)
+{
+    ID3D12Resource *vb = nullptr, *ib = nullptr, *scratch = nullptr, *blas_full = nullptr, *post = nullptr,
+                   *readback = nullptr, *blas_compact = nullptr;
     auto cleanup = [&]()
     {
         rt_rel(vb);
         rt_rel(ib);
         rt_rel(scratch);
-        rt_rel(inst_buf);
         rt_rel(blas_full);
         rt_rel(post);
         rt_rel(readback);
@@ -563,15 +793,13 @@ bool rt_build(const Fvector* verts, u32 nv, const u32* tris, u32 nt)
     if (!vb || !ib)
     {
         cleanup();
-        return false;
+        return nullptr;
     }
     void* p = nullptr;
     D3D12_RANGE no_read{ 0, 0 };
     vb->Map(0, &no_read, &p);
     CopyMemory(p, verts, size_t(vb_size));
     vb->Unmap(0, nullptr);
-    Fbox bb;
-    bb.invalidate();
     for (u32 i = 0; i < nv; ++i)
         bb.modify(verts[i]);
     ib->Map(0, &no_read, &p);
@@ -596,7 +824,7 @@ bool rt_build(const Fvector* verts, u32 nv, const u32* tris, u32 nt)
 
     D3D12_RAYTRACING_GEOMETRY_DESC geom{};
     geom.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-    geom.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+    geom.Flags = opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
     geom.Triangles.VertexBuffer.StartAddress = vb->GetGPUVirtualAddress();
     geom.Triangles.VertexBuffer.StrideInBytes = sizeof(Fvector);
     geom.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
@@ -614,35 +842,22 @@ bool rt_build(const Fvector* verts, u32 nv, const u32* tris, u32 nt)
     bl.pGeometryDescs = &geom;
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bl_info{};
     rt_dev->GetRaytracingAccelerationStructurePrebuildInfo(&bl, &bl_info);
+    full_size = bl_info.ResultDataMaxSizeInBytes;
 
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tl{};
-    tl.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-    tl.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    tl.NumDescs = 1;
-    tl.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tl_info{};
-    rt_dev->GetRaytracingAccelerationStructurePrebuildInfo(&tl, &tl_info);
-
-    const u64 scratch_size = std::max(bl_info.ScratchDataSizeInBytes, tl_info.ScratchDataSizeInBytes);
-    scratch = rt_buffer(scratch_size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    scratch = rt_buffer(bl_info.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     blas_full = rt_buffer(bl_info.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
     post = rt_buffer(8, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     readback = rt_buffer(8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
-    rt_tlas = rt_buffer(tl_info.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    inst_buf = rt_buffer(sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE,
-        D3D12_RESOURCE_STATE_GENERIC_READ);
-    if (!scratch || !blas_full || !post || !readback || !rt_tlas || !inst_buf)
+    if (!scratch || !blas_full || !post || !readback)
     {
         cleanup();
-        rt_rel(rt_tlas);
-        return false;
+        return nullptr;
     }
 
-    // 1. BLAS, with its compacted size written out
+    // BLAS, with its compacted size written out
     u32 slot = rt_begin_list();
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
     bd.Inputs = bl;
@@ -672,68 +887,166 @@ bool rt_build(const Fvector* verts, u32 nv, const u32* tris, u32 nt)
         readback->Unmap(0, &no_read);
     }
 
-    // 2. compact copy (if it helps), then the TLAS over the final BLAS
     ID3D12Resource* blas_final = blas_full;
     if (compact_size && compact_size < bl_info.ResultDataMaxSizeInBytes)
     {
         blas_compact = rt_buffer(compact_size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
         if (blas_compact)
+        {
+            slot = rt_begin_list();
+            rt_list->CopyRaytracingAccelerationStructure(blas_compact->GetGPUVirtualAddress(),
+                blas_full->GetGPUVirtualAddress(), D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+            D3D12_RESOURCE_BARRIER ub{};
+            ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            ub.UAV.pResource = blas_compact;
+            rt_list->ResourceBarrier(1, &ub);
+            rt_end_list(slot, 0, true);
             blas_final = blas_compact;
+        }
     }
+    if (blas_final == blas_compact)
+        blas_compact = nullptr;
+    else
+        blas_full = nullptr;
+    cleanup();
+    return blas_final;
+}
 
-    D3D12_RAYTRACING_INSTANCE_DESC inst{};
-    inst.Transform[0][0] = inst.Transform[1][1] = inst.Transform[2][2] = 1.f;
-    inst.InstanceMask = 0xFF;
-    inst.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-    inst.AccelerationStructure = blas_final->GetGPUVirtualAddress();
+bool rt_build_tlas(ID3D12Resource* blas_opaque, ID3D12Resource* blas_alpha)
+{
+    D3D12_RAYTRACING_INSTANCE_DESC inst[2]{};
+    u32 n = 0;
+    auto add = [&](ID3D12Resource* blas, u32 id)
+    {
+        if (!blas)
+            return;
+        D3D12_RAYTRACING_INSTANCE_DESC& d = inst[n++];
+        d.Transform[0][0] = d.Transform[1][1] = d.Transform[2][2] = 1.f;
+        d.InstanceID = id;
+        d.InstanceMask = 0xFF;
+        d.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+        d.AccelerationStructure = blas->GetGPUVirtualAddress();
+    };
+    add(blas_opaque, 0);
+    add(blas_alpha, 1);
+    if (!n)
+        return false;
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tl{};
+    tl.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    tl.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    tl.NumDescs = n;
+    tl.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tl_info{};
+    rt_dev->GetRaytracingAccelerationStructurePrebuildInfo(&tl, &tl_info);
+
+    ID3D12Resource* scratch = rt_buffer(tl_info.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ID3D12Resource* inst_buf = rt_buffer(sizeof(inst), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE,
+        D3D12_RESOURCE_STATE_GENERIC_READ);
+    rt_tlas = rt_buffer(tl_info.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    if (!scratch || !inst_buf || !rt_tlas)
+    {
+        rt_rel(scratch);
+        rt_rel(inst_buf);
+        rt_rel(rt_tlas);
+        return false;
+    }
+    void* p = nullptr;
+    D3D12_RANGE no_read{ 0, 0 };
     inst_buf->Map(0, &no_read, &p);
-    CopyMemory(p, &inst, sizeof(inst));
+    CopyMemory(p, inst, sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * n);
     inst_buf->Unmap(0, nullptr);
     tl.InstanceDescs = inst_buf->GetGPUVirtualAddress();
 
-    slot = rt_begin_list();
-    if (blas_final == blas_compact)
-    {
-        rt_list->CopyRaytracingAccelerationStructure(blas_compact->GetGPUVirtualAddress(),
-            blas_full->GetGPUVirtualAddress(), D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
-        D3D12_RESOURCE_BARRIER ub{};
-        ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        ub.UAV.pResource = blas_compact;
-        rt_list->ResourceBarrier(1, &ub);
-    }
+    const u32 slot = rt_begin_list();
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC td{};
     td.Inputs = tl;
     td.DestAccelerationStructureData = rt_tlas->GetGPUVirtualAddress();
     td.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
     rt_list->BuildRaytracingAccelerationStructure(&td, 0, nullptr);
     rt_end_list(slot, 0, true);
+    scratch->Release();
+    inst_buf->Release();
+    return true;
+}
 
+// Opaque triangles + optional alpha-tested mesh (UVs / texture slice per triangle for the shader's alpha test)
+bool rt_build_scene(const Fvector* verts, u32 nv, const u32* tris, u32 nt, const RtMesh* mesh)
+{
+    const bool has_alpha = mesh && !mesh->ai.empty();
+    if ((!nv || !nt || !verts || !tris) && !has_alpha)
+    {
+        Msg("! [RT] level static geometry is empty");
+        return false;
+    }
+    CTimer timer;
+    timer.Start();
+
+    Fbox bb;
+    bb.invalidate();
+    u64 full_o = 0, full_a = 0;
+    ID3D12Resource* blas_o = nullptr;
+    ID3D12Resource* blas_a = nullptr;
+    if (nv && nt)
+        blas_o = rt_build_blas(verts, nv, tris, nt, true, full_o, bb);
+    if (has_alpha)
+    {
+        blas_a = rt_build_blas(mesh->av.data(), u32(mesh->av.size()), mesh->ai.data(), u32(mesh->ai.size() / 3), false,
+            full_a, bb);
+        if (blas_a)
+        {
+            rt_a_uv = rt_default_buffer(mesh->auv.data(), u64(mesh->auv.size()) * sizeof(Fvector2));
+            rt_a_idx = rt_default_buffer(mesh->ai.data(), u64(mesh->ai.size()) * sizeof(u32));
+            rt_a_slice = rt_default_buffer(mesh->aslice.data(), u64(mesh->aslice.size()) * sizeof(u32));
+            if (!rt_a_uv || !rt_a_idx || !rt_a_slice)
+            {
+                Msg("! [RT] alpha geometry buffers failed");
+                rt_rel(rt_a_uv);
+                rt_rel(rt_a_idx);
+                rt_rel(rt_a_slice);
+                rt_rel(blas_a);
+            }
+            else
+                rt_a_tris = u32(mesh->ai.size() / 3);
+        }
+    }
+    if ((nv && nt && !blas_o) || (has_alpha && !blas_a))
+    {
+        rt_rel(blas_o);
+        rt_rel(blas_a);
+        return false;
+    }
+    if (!rt_build_tlas(blas_o, blas_a))
+    {
+        rt_rel(blas_o);
+        rt_rel(blas_a);
+        return false;
+    }
     const HRESULT removed = rt_dev->GetDeviceRemovedReason();
     if (FAILED(removed))
     {
         Msg("! [RT] D3D12 device removed during BVH build: 0x%08x", removed);
-        cleanup();
+        rt_rel(blas_o);
+        rt_rel(blas_a);
         rt_rel(rt_tlas);
         return false;
     }
-
-    // keep the final BLAS, drop everything else
-    if (blas_final == blas_compact)
-        blas_compact = nullptr;
-    else
-        blas_full = nullptr;
-    rt_blas = blas_final;
-    cleanup();
+    rt_blas = blas_o;
+    rt_blas_a = blas_a;
 
     const double mb = 1024.0 * 1024.0;
-    Msg("* [RT] BVH built: %u tris, %u verts, BLAS %.1f MB (before compaction %.1f MB), TLAS %.1f KB, %u ms", nt, nv,
-        double(rt_blas->GetDesc().Width) / mb, double(bl_info.ResultDataMaxSizeInBytes) / mb,
-        double(tl_info.ResultDataMaxSizeInBytes) / 1024.0, u32(timer.GetElapsed_ms()));
+    Msg("* [RT] BVH built: opaque %u tris (BLAS %.1f MB of %.1f), alpha-tested %u tris (BLAS %.1f MB of %.1f), %u ms", nt,
+        blas_o ? double(blas_o->GetDesc().Width) / mb : 0.0, double(full_o) / mb, rt_a_tris,
+        blas_a ? double(blas_a->GetDesc().Width) / mb : 0.0, double(full_a) / mb, u32(timer.GetElapsed_ms()));
     Msg("* [RT] level bounds: (%.1f %.1f %.1f) - (%.1f %.1f %.1f)", bb.vMin.x, bb.vMin.y, bb.vMin.z, bb.vMax.x,
         bb.vMax.y, bb.vMax.z);
     return true;
 }
+
+bool rt_build(const Fvector* verts, u32 nv, const u32* tris, u32 nt) { return rt_build_scene(verts, nv, tris, nt, nullptr); }
 
 // ---------------------------------------------------------------------------------------------
 // Debug pass
@@ -813,16 +1126,18 @@ bool rt_dbg_init(ID3D11Device* device11, ID3D11DeviceContext1* ctx1)
     }
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 3; // t1 depth, t2 normals, u0 output
+    hd.NumDescriptors = 7; // t1 depth, t2 normals, u0 output | t3 alpha array, t4 uv, t5 index, t6 slice
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(rt_dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&rt_heap))))
         return false;
 
+    rt_write_alpha_descs();
     Msg("* [RT] debug pass ready (trace shader %u bytes)", u32(sizeof(g_rt_sun_shadow_cs)));
     return true;
 }
 
-bool rt_make_shared(ID3D11Device* device11, RtShared& t, u32 w, u32 h, DXGI_FORMAT fmt, bool uav, const char* name)
+bool rt_make_shared(ID3D11Device* device11, RtShared& t, u32 w, u32 h, DXGI_FORMAT fmt, bool uav, const char* name,
+    u32 arr = 1)
 {
     t.release();
     D3D12_HEAP_PROPERTIES hp{};
@@ -831,7 +1146,7 @@ bool rt_make_shared(ID3D11Device* device11, RtShared& t, u32 w, u32 h, DXGI_FORM
     rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     rd.Width = w;
     rd.Height = h;
-    rd.DepthOrArraySize = 1;
+    rd.DepthOrArraySize = UINT16(arr);
     rd.MipLevels = 1;
     rd.Format = fmt;
     rd.SampleDesc.Count = 1;
@@ -863,6 +1178,193 @@ bool rt_make_shared(ID3D11Device* device11, RtShared& t, u32 w, u32 h, DXGI_FORM
         t.release();
         return false;
     }
+    return true;
+}
+
+
+// ---- alpha textures for the any-hit test -------------------------------------------------------
+constexpr const char* RT_ALPHA_CS = R"(
+cbuffer C : register(b0)
+{
+    uint slice;
+    uint size;
+    uint2 pad;
+};
+Texture2D<float4> src : register(t0);
+SamplerState smp : register(s0);
+RWTexture2DArray<unorm float> dst : register(u0);
+
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= size || id.y >= size)
+        return;
+    uint w, h, m;
+    src.GetDimensions(0, w, h, m);
+    const float lod = max(0.0, log2(float(max(w, h)) / float(size)));
+    const float2 uv = (float2(id.xy) + 0.5) / float(size);
+    dst[uint3(id.xy, slice)] = src.SampleLevel(smp, uv, lod).a;
+}
+)";
+
+ID3D11ComputeShader* rt_alpha_cs = nullptr;
+ID3D11Buffer* rt_alpha_cb = nullptr;
+ID3D11SamplerState* rt_alpha_smp = nullptr;
+
+void rt_write_alpha_descs()
+{
+    if (!rt_heap || !rt_dev)
+        return;
+    const u32 inc = rt_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE h = rt_heap->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += size_t(3) * inc;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = DXGI_FORMAT_R8_UNORM;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2DArray.MipLevels = 1;
+    sd.Texture2DArray.ArraySize = rt_alpha_slices ? rt_alpha_slices : 1;
+    rt_dev->CreateShaderResourceView(rt_alpha_slices ? rt_s_alpha.r12 : nullptr, &sd, h);
+    ID3D12Resource* bufs[3] = { rt_a_uv, rt_a_idx, rt_a_slice };
+    for (ID3D12Resource* b : bufs)
+    {
+        h.ptr += inc;
+        D3D12_SHADER_RESOURCE_VIEW_DESC bd{};
+        bd.Format = DXGI_FORMAT_R32_TYPELESS;
+        bd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        bd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        bd.Buffer.NumElements = b ? u32(b->GetDesc().Width / 4) : 1;
+        bd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        rt_dev->CreateShaderResourceView(b, &bd, h);
+    }
+}
+
+void rt_alpha_release()
+{
+    rt_s_alpha.release();
+    rt_alpha_slices = 0;
+    rt_alpha_size = 0;
+    rt_write_alpha_descs();
+}
+
+bool rt_dbg_init(ID3D11Device* device11, ID3D11DeviceContext1* ctx1);
+
+// Alpha channel of each texture, resampled to size x size, into one shared array (slice = index in tex)
+bool rt_alpha_build(ID3D11Device* device11, const xr_vector<CTexture*>& tex)
+{
+    ID3D11DeviceContext1* ctx1 = HW.pContext1;
+    if (!ctx1 || tex.empty() || !rt_ok)
+        return false;
+    if (!rt_dbg_tried)
+    {
+        rt_dbg_tried = true;
+        rt_dbg_ok = rt_dbg_init(device11, ctx1);
+    }
+    if (!rt_dbg_ok)
+        return false;
+
+    const u32 n = u32(tex.size());
+    const u32 size = n <= 256 ? 512u : 256u;
+    if (!rt_alpha_cs)
+    {
+        ID3DBlob *blob = nullptr, *errors = nullptr;
+        HRESULT hr = D3DCompile(RT_ALPHA_CS, xr_strlen(RT_ALPHA_CS), "rt_alpha", nullptr, nullptr, "main", "cs_5_0",
+            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &blob, &errors);
+        if (FAILED(hr))
+        {
+            Msg("! [RT] alpha shader failed to compile: %s",
+                errors ? static_cast<const char*>(errors->GetBufferPointer()) : "?");
+            rt_rel(errors);
+            return false;
+        }
+        rt_rel(errors);
+        hr = device11->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &rt_alpha_cs);
+        rt_rel(blob);
+        if (FAILED(hr))
+            return false;
+        D3D11_BUFFER_DESC cbd{};
+        cbd.ByteWidth = 16;
+        cbd.Usage = D3D11_USAGE_DYNAMIC;
+        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        sd.MaxLOD = D3D11_FLOAT32_MAX;
+        sd.MaxAnisotropy = 1;
+        if (FAILED(device11->CreateBuffer(&cbd, nullptr, &rt_alpha_cb)) ||
+            FAILED(device11->CreateSamplerState(&sd, &rt_alpha_smp)))
+            return false;
+    }
+
+    rt_alpha_release();
+    if (!rt_make_shared(device11, rt_s_alpha, size, size, DXGI_FORMAT_R8_UNORM, false, "alpha array", n))
+    {
+        rt_alpha_release();
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = size;
+    td.MipLevels = 1;
+    td.ArraySize = n;
+    td.Format = DXGI_FORMAT_R8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    ID3D11Texture2D* work = nullptr;
+    ID3D11UnorderedAccessView* uav = nullptr;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = DXGI_FORMAT_R8_UNORM;
+    ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+    ud.Texture2DArray.ArraySize = n;
+    if (FAILED(device11->CreateTexture2D(&td, nullptr, &work)) ||
+        FAILED(device11->CreateUnorderedAccessView(work, &ud, &uav)))
+    {
+        Msg("! [RT] cannot create alpha work texture (%u slices of %ux%u)", n, size, size);
+        rt_rel(uav);
+        rt_rel(work);
+        rt_alpha_release();
+        return false;
+    }
+
+    CTimer timer;
+    timer.Start();
+    ID3DDeviceContextState* engine_state = nullptr;
+    ctx1->SwapDeviceContextState(rt_state11, &engine_state);
+    u32 done = 0;
+    for (u32 k = 0; k < n; ++k)
+    {
+        ID3D11ShaderResourceView* srv = tex[k] ? tex[k]->get_SRView() : nullptr;
+        if (!srv)
+            continue;
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (FAILED(ctx1->Map(rt_alpha_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+            continue;
+        u32* c = static_cast<u32*>(m.pData);
+        c[0] = k;
+        c[1] = size;
+        c[2] = c[3] = 0;
+        ctx1->Unmap(rt_alpha_cb, 0);
+        ctx1->CSSetShader(rt_alpha_cs, nullptr, 0);
+        ctx1->CSSetConstantBuffers(0, 1, &rt_alpha_cb);
+        ctx1->CSSetSamplers(0, 1, &rt_alpha_smp);
+        ctx1->CSSetShaderResources(0, 1, &srv);
+        ctx1->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        ctx1->Dispatch(size / 8, size / 8, 1);
+        ++done;
+    }
+    ctx1->ClearState();
+    ctx1->CopyResource(rt_s_alpha.t11, work);
+    ctx1->SwapDeviceContextState(engine_state, nullptr);
+    rt_rel(engine_state);
+    ctx1->Flush();
+    uav->Release();
+    work->Release();
+
+    rt_alpha_slices = n;
+    rt_alpha_size = size;
+    rt_write_alpha_descs();
+    Msg("* [RT] alpha textures: %u of %u converted (%ux%u), %u ms", done, n, size, size, u32(timer.GetElapsed_ms()));
     return true;
 }
 
@@ -982,6 +1484,9 @@ void rt_dbg_shutdown()
     rt_rel(rt_prep_cs);
     rt_rel(rt_ctx4);
     rt_rel(rt_fence11);
+    rt_rel(rt_alpha_cs);
+    rt_rel(rt_alpha_cb);
+    rt_rel(rt_alpha_smp);
     rt_dbg_tried = false;
     rt_dbg_ok = false;
 }
@@ -1023,11 +1528,15 @@ void Tick(ID3D11Device* device11)
         CTimer t;
         t.Start();
         const bool got = rt_collect_visuals(mesh);
-        Msg("* [RT] visible geometry: %u visuals, %u tris, %u verts (skipped: %u alpha-tested, %u other), %u ms",
-            mesh.visuals, u32(mesh.i.size() / 3), u32(mesh.v.size()), mesh.skipped_aref, mesh.skipped_other,
+        Msg("* [RT] visible geometry: %u opaque visuals (%u tris, %u verts), %u alpha-tested visuals (%u trees; %u tris, "
+            "%u verts, %u textures, %u without texture), skipped %u, %u ms",
+            mesh.visuals, u32(mesh.i.size() / 3), u32(mesh.v.size()), mesh.alpha_visuals, mesh.trees,
+            u32(mesh.ai.size() / 3), u32(mesh.av.size()), u32(mesh.tex.size()), mesh.tex_missing, mesh.skipped_other,
             u32(t.GetElapsed_ms()));
         FlushLog();
-        ok = got && rt_build(mesh.v.data(), u32(mesh.v.size()), mesh.i.data(), u32(mesh.i.size() / 3));
+        ok = got && rt_build_scene(mesh.v.data(), u32(mesh.v.size()), mesh.i.data(), u32(mesh.i.size() / 3), &mesh);
+        if (ok && rt_a_tris && !mesh.tex.empty())
+            rt_alpha_build(device11, mesh.tex);
         rt_built_key = key;
         rt_built_any = true;
     }
@@ -1181,6 +1690,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     tc.width = dd.Width; // pixel -> NDC mapping is in depth (render) resolution
     tc.height = dd.Height;
     tc.max_dist = 1000.f;
+    tc.alpha_thr = (rt_a_tris && rt_alpha_slices) ? ps_r__rt_aref : 0.f;
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c)
             tc.iv[r][c] = pc.inv_view.m[r][c];
@@ -1197,6 +1707,11 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     rt_list->SetComputeRoot32BitConstants(0, 32, &tc, 0);
     rt_list->SetComputeRootShaderResourceView(1, rt_tlas->GetGPUVirtualAddress());
     rt_list->SetComputeRootDescriptorTable(2, rt_heap->GetGPUDescriptorHandleForHeapStart());
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE ha = rt_heap->GetGPUDescriptorHandleForHeapStart();
+        ha.ptr += u64(3) * rt_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        rt_list->SetComputeRootDescriptorTable(3, ha);
+    }
     rt_list->Dispatch((dd.Width + 7) / 8, (dd.Height + 7) / 8, 1);
     const u64 v_done = rt_end_list(slot, v_inputs, false);
 

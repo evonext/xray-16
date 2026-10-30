@@ -26,6 +26,7 @@ public:
     virtual void Load(LPCSTR N, IReader* data, u32 dwFlags);
     virtual void Copy(dxRender_Visual* pFrom);
     virtual void Release();
+    const Fmatrix& GetXform() const { return xform; } // local (compressed) vertex space -> world
 
     FTreeVisual(void);
     virtual ~FTreeVisual(void);
@@ -65,6 +66,7 @@ public:
     virtual void Load(LPCSTR N, IReader* data, u32 dwFlags);
     virtual void Copy(dxRender_Visual* pFrom);
     virtual void Release();
+    void GetMaxLod(u32& offset, u32& tris, u32& verts) const; // most detailed level
 
 private:
     FTreeVisual_PM(const FTreeVisual_PM& other);
