@@ -434,6 +434,10 @@ bool rt_collect_visuals(RtMesh& out)
     Msg("* [RT] level.geom read, collecting visuals (%u)", u32(r.Visuals.size()));
     FlushLog();
 
+    // exact-size reserve() per visual would reallocate (and copy) the whole array 20k times: reserve once
+    out.v.reserve(size_t(8) << 20);
+    out.i.reserve(size_t(24) << 20);
+
     auto add = [&](Fvisual* f, u32 idx_first, u32 tris)
     {
         const ptrdiff_t vid = f->p_rm_Vertices - r.nVB.data();
@@ -451,14 +455,12 @@ bool rt_collect_visuals(RtMesh& out)
             return;
         }
         const u32 base = u32(out.v.size());
-        out.v.reserve(out.v.size() + f->vCount);
         for (u32 k = 0; k < f->vCount; ++k)
         {
             Fvector p;
             CopyMemory(&p, vb.data.data() + size_t(f->vBase + k) * vb.stride, sizeof(Fvector));
             out.v.push_back(p);
         }
-        out.i.reserve(out.i.size() + size_t(tris) * 3);
         for (u32 k = 0; k < tris * 3; ++k)
         {
             const u32 ix = ib[idx_first + k];
