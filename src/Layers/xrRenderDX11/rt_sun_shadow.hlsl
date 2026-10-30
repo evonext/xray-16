@@ -220,7 +220,7 @@ void reflect_pixel(int2 p, float4 c)
     if (r.y < 0.02)
         r = normalize(float3(r.x, 0.02, r.z)); // never reflect into the water itself
     const float cosv = saturate(dot(-dir, n));
-    const float fres = 0.02 + 0.98 * pow(1.0 - cosv, 5.0);
+    const float fres = 0.10 + 0.90 * pow(1.0 - cosv, 3.0);
 
     // reflected ray against the level
     float ht;
@@ -252,7 +252,7 @@ void reflect_pixel(int2 p, float4 c)
     if (lit > 0.5)
         refl += ex3.rgb * pow(saturate(dot(r, sun_dir)), 1500.0) * 8.0;
 
-    const float k = saturate(fres * ex1.z * 1.6);
+    const float k = saturate(fres * ex1.z * 1.3);
     u_out[p] = float4(lerp(sc.rgb, refl, k), sc.a);
 }
 
