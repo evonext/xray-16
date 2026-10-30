@@ -714,6 +714,11 @@ bool rt_collect_visuals(RtMesh& out)
             {
                 const char* n = e->passes[0]->ps->cName.c_str();
                 aref = n && strstr(n, "aref");
+                // water surface: translucent, drawn forward; it must not shadow the river bed under it
+                const char* w = n;
+                const char* vn = e->passes[0]->vs ? e->passes[0]->vs->cName.c_str() : nullptr;
+                if ((w && strstr(w, "water")) || (vn && strstr(vn, "water")))
+                    drawn = false;
             }
         }
         if (!drawn)
