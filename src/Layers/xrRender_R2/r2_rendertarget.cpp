@@ -333,7 +333,7 @@ CRenderTarget::CRenderTarget()
         // generic(LDR) RTs
         rt_Generic_0.create(r2_RT_generic0, w, h, D3DFMT_A8R8G8B8, 1);
 #if defined(XR_DLSS)
-        rt_RTSun.create(r2_RT_rtsun, w, h, D3DFMT_G16R16, 1);
+        rt_RTSun.create(r2_RT_rtsun, w, h, D3DFMT_A8B8G8R8, 1);
 #endif
         rt_Generic_1.create(r2_RT_generic1, w, h, D3DFMT_A8R8G8B8, 1);
         rt_Generic.create(r2_RT_generic, w, h, D3DFMT_A8R8G8B8, 1);

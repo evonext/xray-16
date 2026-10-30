@@ -8,7 +8,7 @@
 // Modes:   1 = sun visibility * N.L (grey), 2 = G-buffer normals (world), 3 = scene darkened where RT shadow,
 //          4 = normals reconstructed from depth, 5 = sun visibility only (R8 mask for the sun shader: 1 lit, 0 shadow)
 
-#define RS "RootConstants(num32BitConstants=40, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0)), DescriptorTable(SRV(t3, numDescriptors=4)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT, addressU=TEXTURE_ADDRESS_WRAP, addressV=TEXTURE_ADDRESS_WRAP, addressW=TEXTURE_ADDRESS_WRAP)"
+#define RS "RootConstants(num32BitConstants=48, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0)), DescriptorTable(SRV(t3, numDescriptors=5)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT, addressU=TEXTURE_ADDRESS_WRAP, addressV=TEXTURE_ADDRESS_WRAP, addressW=TEXTURE_ADDRESS_WRAP)"
 
 cbuffer C : register(b0)
 {
@@ -26,7 +26,9 @@ cbuffer C : register(b0)
     float4 iv3;
     float4 proj; // P11, P22, P31, P32 (as rendered)
     float4 ex0; // x: frame, y: sun disk tan(half-angle), z: sun rays, w: AO rays
-    float4 ex1; // x: AO radius (m), y: flags (bit0: sun, bit1: AO), z/w: unused
+    float4 ex1; // x: AO radius (m), y: flags (bit0: sun, bit1: AO), z: reflection strength, w: time (s)
+    float4 ex2; // rgb: fallback sky colour, w: water ripple amplitude
+    float4 ex3; // rgb: sun colour
 };
 
 RaytracingAccelerationStructure scene : register(t0);
@@ -37,6 +39,7 @@ Texture2DArray<float> t_alpha : register(t3);
 ByteAddressBuffer b_uv : register(t4);
 ByteAddressBuffer b_idx : register(t5);
 ByteAddressBuffer b_slice : register(t6);
+Texture2D<float4> t_color : register(t7); // copy of the scene colour (mode 7)
 SamplerState smp : register(s0);
 
 float3 oct_decode(float2 e)
@@ -89,7 +92,7 @@ float trace_sun(float3 origin, float3 dir, float tmax, out float hit_t)
     ray.TMin = 0.0;
     ray.TMax = tmax;
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
+    q.TraceRayInline(scene, RAY_FLAG_NONE, 0x01, ray);
     while (q.Proceed())
     {
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
@@ -143,6 +146,116 @@ void make_onb(float3 n, out float3 t, out float3 b)
     b = float3(k, sgn + n.y * n.y * a, -n.y);
 }
 
+// ---- mode 7: ray traced reflections on water -------------------------------------------------
+// Water surfaces live in their own BLAS (ray mask 2). A camera ray that hits the water in front of the depth buffer
+// marks a water pixel; the reflected ray is traced against the level (mask 1) and the colour at the hit point is
+// taken from the already rendered frame (screen space), with the fogged sky as a fallback.
+
+float3 pixel_dir(int2 p)
+{
+    const float2 uv = (float2(p) + 0.5) / float2(width, height);
+    const float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    const float3 v = float3((ndc.x - proj.z) / proj.x, (ndc.y - proj.w) / proj.y, 1.0);
+    return normalize(v.x * iv0.xyz + v.y * iv1.xyz + v.z * iv2.xyz);
+}
+
+// world position -> pixel coordinates and view depth; false when behind the camera
+bool project_px(float3 w, out float2 px, out float vz)
+{
+    const float3 d = w - iv3.xyz;
+    const float3 v = float3(dot(d, iv0.xyz), dot(d, iv1.xyz), dot(d, iv2.xyz));
+    vz = v.z;
+    px = float2(0, 0);
+    if (v.z < 0.05)
+        return false;
+    const float2 ndc = float2(v.x * proj.x / v.z + proj.z, v.y * proj.y / v.z + proj.w);
+    px = (ndc * float2(0.5, -0.5) + 0.5) * float2(width, height);
+    return true;
+}
+
+float3 water_normal(float3 pos, float amp, float t)
+{
+    // cheap ripples: a few travelling sine waves
+    float2 g = float2(0, 0);
+    g += float2(0.8, 0.6) * cos(dot(pos.xz, float2(0.8, 0.6)) * 2.3 + t * 1.1);
+    g += float2(-0.5, 0.86) * cos(dot(pos.xz, float2(-0.5, 0.86)) * 3.7 - t * 1.7) * 0.7;
+    g += float2(0.97, -0.25) * cos(dot(pos.xz, float2(0.97, -0.25)) * 6.1 + t * 2.3) * 0.5;
+    g += float2(-0.2, -0.98) * cos(dot(pos.xz, float2(-0.2, -0.98)) * 9.7 - t * 3.1) * 0.3;
+    return normalize(float3(-g.x * amp, 1.0, -g.y * amp));
+}
+
+float4 scene_at(int2 q)
+{
+    q = clamp(q, int2(0, 0), int2(int(width) - 1, int(height) - 1));
+    return t_color.Load(int3(q, 0));
+}
+
+void reflect_pixel(int2 p, float4 c)
+{
+    const float4 sc = scene_at(p);
+    u_out[p] = sc;
+    if (abs(c.w - 2.0) < 0.01)
+        return; // HUD
+    const float3 dir = pixel_dir(p);
+    const float tgeo = c.w > 0.5 ? length(c.xyz - cam_pos) : 100000.0;
+
+    // water in front of the visible surface?
+    RayDesc wr;
+    wr.Origin = cam_pos;
+    wr.Direction = dir;
+    wr.TMin = 0.01;
+    wr.TMax = tgeo + 0.05;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_CULL_NON_OPAQUE> wq;
+    wq.TraceRayInline(scene, RAY_FLAG_NONE, 0x02, wr);
+    while (wq.Proceed())
+    {
+    }
+    if (wq.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+        return;
+    const float tw = wq.CommittedRayT();
+    const float3 pw = cam_pos + dir * tw;
+
+    const float3 n = water_normal(pw, ex2.w, ex1.w);
+    float3 r = reflect(dir, n);
+    if (r.y < 0.02)
+        r = normalize(float3(r.x, 0.02, r.z)); // never reflect into the water itself
+    const float cosv = saturate(dot(-dir, n));
+    const float fres = 0.02 + 0.98 * pow(1.0 - cosv, 5.0);
+
+    // reflected ray against the level
+    float ht;
+    const float3 org = pw + n * 0.03;
+    float3 refl = ex2.rgb; // fallback: fogged sky colour
+    const float lit = trace_sun(org, r, 400.0, ht);
+    float3 target = org + r * (lit > 0.5 ? 4000.0 : ht);
+    float2 px;
+    float vz;
+    bool got = false;
+    if (project_px(target, px, vz))
+    {
+        const int2 q = int2(px);
+        if (q.x >= 0 && q.y >= 0 && q.x < int(width) && q.y < int(height))
+        {
+            const float zb = t_z.Load(int3(q, 0));
+            // a ray hit must land on the visible surface; a miss must land on the sky
+            const bool ok = lit > 0.5 ? (zb == 0.0) : (zb > 0.0 && abs(zb - vz) < 0.6 + 0.03 * vz);
+            if (ok)
+            {
+                refl = t_color.Load(int3(q, 0)).rgb;
+                got = true;
+            }
+        }
+    }
+    if (!got && lit < 0.5)
+        refl = lerp(ex2.rgb, float3(0.12, 0.12, 0.11), 0.6); // hit somewhere off screen: dark ground tint
+    // sun glint where the reflected ray leaves the scene towards the sun
+    if (lit > 0.5)
+        refl += ex3.rgb * pow(saturate(dot(r, sun_dir)), 1500.0) * 8.0;
+
+    const float k = saturate(fres * ex1.z * 1.6);
+    u_out[p] = float4(lerp(sc.rgb, refl, k), sc.a);
+}
+
 [RootSignature(RS)]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -153,6 +266,11 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     const int2 p = int2(id.xy);
     const float4 c = load_pos(p);
+    if (mode == 7)
+    {
+        reflect_pixel(p, c);
+        return;
+    }
     float4 scene_col = float4(0, 0, 0, 1);
     if (mode != 5)
         scene_col = u_out[p];

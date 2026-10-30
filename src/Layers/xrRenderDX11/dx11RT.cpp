@@ -65,6 +65,7 @@ u64 rt_fence_value = 0;
 
 // Acceleration structures of the current level
 ID3D12Resource* rt_blas = nullptr; // opaque geometry
+ID3D12Resource* rt_blas_w = nullptr; // water surfaces: ray mask 2, only the reflection pass sees them
 ID3D12Resource* rt_blas_a = nullptr; // alpha-tested geometry (foliage, trees): non-opaque, any-hit in the shader
 ID3D12Resource* rt_tlas = nullptr;
 ID3D12Resource* rt_a_uv = nullptr; // float2 per vertex of the alpha BLAS (raw SRV)
@@ -109,7 +110,7 @@ ID3D12RootSignature* rt_rs = nullptr;
 ID3D12PipelineState* rt_pso = nullptr;
 ID3D12DescriptorHeap* rt_heap = nullptr;
 
-RtShared rt_s_z, rt_s_n, rt_s_out;
+RtShared rt_s_z, rt_s_n, rt_s_out, rt_s_in;
 RtShared rt_s_alpha; // R8 array: alpha channel of the base texture of every alpha-tested material (any-hit)
 u32 rt_alpha_slices = 0;
 u32 rt_alpha_size = 0;
@@ -126,7 +127,7 @@ struct alignas(16) RtPrepConstants
     float opt[4]; // x: G-buffer normal packed into rt_Position.xy (gbuffer_opt), y: G-buffer bound
 };
 
-struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (40 dwords)
+struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (48 dwords)
 {
     float sun[3];
     u32 mode;
@@ -139,9 +140,11 @@ struct RtTraceConstants // matches cbuffer C in rt_sun_shadow.hlsl (40 dwords)
     float iv[4][4]; // inverse view rows
     float proj[4]; // P11, P22, P31, P32
     float ex0[4]; // frame, sun disk tan(half-angle), sun rays, AO rays
-    float ex1[4]; // AO radius, flags (bit0 sun, bit1 AO)
+    float ex1[4]; // AO radius, flags (bit0 sun, bit1 AO), reflection strength, time
+    float ex2[4]; // fallback sky colour (rgb), water ripple amplitude
+    float ex3[4]; // sun colour (rgb), unused
 };
-static_assert(sizeof(RtTraceConstants) == 40 * 4);
+static_assert(sizeof(RtTraceConstants) == 48 * 4);
 
 // Depth -> view-space z (0 = sky / far plane, -1 = HUD); G-buffer normal -> octahedral encoding
 constexpr const char* RT_PREP_CS = R"(
@@ -346,6 +349,7 @@ void rt_release_as()
     rt_rel(rt_tlas);
     rt_rel(rt_blas);
     rt_rel(rt_blas_a);
+    rt_rel(rt_blas_w);
     rt_rel(rt_a_uv);
     rt_rel(rt_a_idx);
     rt_rel(rt_a_slice);
@@ -375,6 +379,10 @@ struct RtMesh
     xr_vector<u32> ai;
     xr_vector<u32> aslice; // per triangle: index into tex, or RT_NO_SLICE (treated as opaque)
     xr_vector<CTexture*> tex;
+    // water
+    xr_vector<Fvector> wv;
+    xr_vector<u32> wi;
+    u32 water_visuals{};
     u32 visuals{};
     u32 alpha_visuals{};
     u32 trees{};
@@ -583,6 +591,7 @@ bool rt_collect_visuals(RtMesh& out)
     };
 
     // mesh: vertex / index ranges of the visual; xf: tree transform (null for static geometry); alpha: base texture
+    bool to_water = false; // set by the visitor before add(): the (opaque style) mesh goes into the water BLAS
     auto add = [&](dxRender_Visual* vis, IRender_Mesh* m, u32 idx_first, u32 tris, u32 vcount, const Fmatrix* xf,
                    bool tree, bool alpha)
     {
@@ -613,15 +622,20 @@ bool rt_collect_visuals(RtMesh& out)
 
         if (!alpha)
         {
-            const u32 base = u32(out.v.size());
+            xr_vector<Fvector>& dv = to_water ? out.wv : out.v;
+            xr_vector<u32>& di = to_water ? out.wi : out.i;
+            const u32 base = u32(dv.size());
             for (u32 k = 0; k < vcount; ++k)
-                out.v.push_back(decode_pos(vb, m->vBase + k, nullptr));
+                dv.push_back(decode_pos(vb, m->vBase + k, nullptr));
             for (u32 k = 0; k < tris * 3; ++k)
             {
                 const u32 ix = ib[idx_first + k];
-                out.i.push_back(ix < vcount ? base + ix : base);
+                di.push_back(ix < vcount ? base + ix : base);
             }
-            ++out.visuals;
+            if (to_water)
+                ++out.water_visuals;
+            else
+                ++out.visuals;
             return;
         }
 
@@ -704,7 +718,7 @@ bool rt_collect_visuals(RtMesh& out)
             return;
 
         // deferred shader of the material: alpha-tested pixel shaders carry "aref" in the name
-        bool aref = false, drawn = true;
+        bool aref = false, drawn = true, water = false;
         if (Shader* sh = f->shader._get())
         {
             ShaderElement* e = sh->E[0]._get();
@@ -718,7 +732,7 @@ bool rt_collect_visuals(RtMesh& out)
                 const char* w = n;
                 const char* vn = e->passes[0]->vs ? e->passes[0]->vs->cName.c_str() : nullptr;
                 if ((w && strstr(w, "water")) || (vn && strstr(vn, "water")))
-                    drawn = false;
+                    water = true;
             }
         }
         if (!drawn)
@@ -726,6 +740,7 @@ bool rt_collect_visuals(RtMesh& out)
             ++out.skipped_other;
             return;
         }
+        to_water = water;
 
         if (v->Type == MT_PROGRESSIVE)
         {
@@ -920,23 +935,24 @@ ID3D12Resource* rt_build_blas(const Fvector* verts, u32 nv, const u32* tris, u32
     return blas_final;
 }
 
-bool rt_build_tlas(ID3D12Resource* blas_opaque, ID3D12Resource* blas_alpha)
+bool rt_build_tlas(ID3D12Resource* blas_opaque, ID3D12Resource* blas_alpha, ID3D12Resource* blas_water)
 {
-    D3D12_RAYTRACING_INSTANCE_DESC inst[2]{};
+    D3D12_RAYTRACING_INSTANCE_DESC inst[3]{};
     u32 n = 0;
-    auto add = [&](ID3D12Resource* blas, u32 id)
+    auto add = [&](ID3D12Resource* blas, u32 id, u32 mask)
     {
         if (!blas)
             return;
         D3D12_RAYTRACING_INSTANCE_DESC& d = inst[n++];
         d.Transform[0][0] = d.Transform[1][1] = d.Transform[2][2] = 1.f;
         d.InstanceID = id;
-        d.InstanceMask = 0xFF;
+        d.InstanceMask = mask;
         d.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
         d.AccelerationStructure = blas->GetGPUVirtualAddress();
     };
-    add(blas_opaque, 0);
-    add(blas_alpha, 1);
+    add(blas_opaque, 0, 0x1);
+    add(blas_alpha, 1, 0x1);
+    add(blas_water, 2, 0x2);
     if (!n)
         return false;
 
@@ -994,9 +1010,12 @@ bool rt_build_scene(const Fvector* verts, u32 nv, const u32* tris, u32 nt, const
 
     Fbox bb;
     bb.invalidate();
-    u64 full_o = 0, full_a = 0;
+    u64 full_o = 0, full_a = 0, full_w = 0;
     ID3D12Resource* blas_o = nullptr;
     ID3D12Resource* blas_a = nullptr;
+    ID3D12Resource* blas_w = nullptr;
+    if (mesh && !mesh->wi.empty())
+        blas_w = rt_build_blas(mesh->wv.data(), u32(mesh->wv.size()), mesh->wi.data(), u32(mesh->wi.size() / 3), true, full_w, bb);
     if (nv && nt)
         blas_o = rt_build_blas(verts, nv, tris, nt, true, full_o, bb);
     if (has_alpha)
@@ -1026,10 +1045,11 @@ bool rt_build_scene(const Fvector* verts, u32 nv, const u32* tris, u32 nt, const
         rt_rel(blas_a);
         return false;
     }
-    if (!rt_build_tlas(blas_o, blas_a))
+    if (!rt_build_tlas(blas_o, blas_a, blas_w))
     {
         rt_rel(blas_o);
         rt_rel(blas_a);
+        rt_rel(blas_w);
         return false;
     }
     const HRESULT removed = rt_dev->GetDeviceRemovedReason();
@@ -1038,16 +1058,20 @@ bool rt_build_scene(const Fvector* verts, u32 nv, const u32* tris, u32 nt, const
         Msg("! [RT] D3D12 device removed during BVH build: 0x%08x", removed);
         rt_rel(blas_o);
         rt_rel(blas_a);
+        rt_rel(blas_w);
         rt_rel(rt_tlas);
         return false;
     }
     rt_blas = blas_o;
     rt_blas_a = blas_a;
+    rt_blas_w = blas_w;
 
     const double mb = 1024.0 * 1024.0;
     Msg("* [RT] BVH built: opaque %u tris (BLAS %.1f MB of %.1f), alpha-tested %u tris (BLAS %.1f MB of %.1f), %u ms", nt,
         blas_o ? double(blas_o->GetDesc().Width) / mb : 0.0, double(full_o) / mb, rt_a_tris,
         blas_a ? double(blas_a->GetDesc().Width) / mb : 0.0, double(full_a) / mb, u32(timer.GetElapsed_ms()));
+    if (blas_w)
+        Msg("* [RT] water: %u visuals, %u tris", mesh->water_visuals, u32(mesh->wi.size() / 3));
     Msg("* [RT] level bounds: (%.1f %.1f %.1f) - (%.1f %.1f %.1f)", bb.vMin.x, bb.vMin.y, bb.vMin.z, bb.vMax.x,
         bb.vMax.y, bb.vMax.z);
     return true;
@@ -1133,7 +1157,7 @@ bool rt_dbg_init(ID3D11Device* device11, ID3D11DeviceContext1* ctx1)
     }
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 7; // t1 depth, t2 normals, u0 output | t3 alpha array, t4 uv, t5 index, t6 slice
+    hd.NumDescriptors = 8; // t1 depth, t2 normals, u0 output | t3 alpha array, t4 uv, t5 index, t6 slice, t7 scene colour copy
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(rt_dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&rt_heap))))
         return false;
@@ -1390,6 +1414,7 @@ void rt_dbg_release_textures()
     rt_s_z.release();
     rt_s_n.release();
     rt_s_out.release();
+    rt_s_in.release();
     rt_pos_w = rt_pos_h = rt_out_w = rt_out_h = 0;
     rt_out_fmt = DXGI_FORMAT_UNKNOWN;
 }
@@ -1429,7 +1454,8 @@ bool rt_dbg_ensure(ID3D11Device* device11, ID3D11Texture2D* depth, ID3D11Texture
     // same formats / flags as the DLSS-NR shared textures (known to open in D3D11)
     if (!rt_make_shared(device11, rt_s_z, pw, ph, DXGI_FORMAT_R32_FLOAT, false, "depth") ||
         !rt_make_shared(device11, rt_s_n, pw, ph, DXGI_FORMAT_R16G16_FLOAT, false, "normals") ||
-        !rt_make_shared(device11, rt_s_out, ow, oh, ofmt, true, "output"))
+        !rt_make_shared(device11, rt_s_out, ow, oh, ofmt, true, "output") ||
+        !rt_make_shared(device11, rt_s_in, ow, oh, ofmt, false, "input"))
         return false;
     D3D11_TEXTURE2D_DESC zd{};
     zd.Width = pw;
@@ -1470,6 +1496,14 @@ bool rt_dbg_ensure(ID3D11Device* device11, ID3D11Texture2D* depth, ID3D11Texture
     uav.Format = ofmt;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     rt_dev->CreateUnorderedAccessView(rt_s_out.r12, nullptr, &uav, hcpu);
+    // t7: copy of the scene colour (reflection pass reads other pixels while u0 is being written)
+    hcpu.ptr += inc * 5;
+    D3D12_SHADER_RESOURCE_VIEW_DESC csrv{};
+    csrv.Format = ofmt;
+    csrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    csrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    csrv.Texture2D.MipLevels = 1;
+    rt_dev->CreateShaderResourceView(rt_s_in.r12, &csrv, hcpu);
 
     rt_pos_w = pw;
     rt_pos_h = ph;
@@ -1583,7 +1617,7 @@ void Tick(ID3D11Device* device11)
 
 // color: scene color (debug views) or, with mask_only, the R8 sun-visibility target (sized like the depth)
 static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
-    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool mask_only)
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool mask_only, bool refl = false)
 {
     if (!ps_r__rt || !rt_ok || !rt_tlas || !color || !depth || !ctx1)
         return false;
@@ -1615,7 +1649,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
         if (gd.Width != dd.Width || gd.Height != dd.Height || gd.SampleDesc.Count > 1)
             gbuffer = nullptr;
     }
-    if (mask_only && (cd.Width != dd.Width || cd.Height != dd.Height || cd.Format != DXGI_FORMAT_R16G16_UNORM))
+    if (mask_only && (cd.Width != dd.Width || cd.Height != dd.Height || cd.Format != DXGI_FORMAT_R8G8B8A8_UNORM))
     {
         static bool warned = false;
         if (!warned)
@@ -1667,6 +1701,8 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
         ctx1->CopyResource(rt_s_n.t11, rt_n11);
         if (!mask_only)
             ctx1->CopyResource(rt_s_out.t11, color);
+        if (refl)
+            ctx1->CopyResource(rt_s_in.t11, color);
     }
     ctx1->SwapDeviceContextState(engine_state, nullptr);
     rt_rel(engine_state);
@@ -1689,7 +1725,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     tc.sun[0] = sun.x;
     tc.sun[1] = sun.y;
     tc.sun[2] = sun.z;
-    tc.mode = mask_only ? 5u : u32(ps_r__rt_debug);
+    tc.mode = mask_only ? 5u : (refl ? 7u : u32(ps_r__rt_debug));
     tc.cam[0] = Device.vCameraPosition.x;
     tc.cam[1] = Device.vCameraPosition.y;
     tc.cam[2] = Device.vCameraPosition.z;
@@ -1712,13 +1748,26 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     tc.ex0[3] = float(ps_r__rt_ao_rays);
     tc.ex1[0] = ps_r__rt_ao_radius;
     tc.ex1[1] = float((ps_r__rt_sun ? 1 : 0) | (ps_r__rt_ao ? 2 : 0));
+    tc.ex1[2] = ps_r__rt_refl_k;
+    tc.ex1[3] = float(double(Device.dwTimeGlobal) * 0.001);
+    if (g_pGamePersistent)
+    {
+        const auto& env = g_pGamePersistent->Environment().CurrentEnv;
+        tc.ex2[0] = env.fog_color.x;
+        tc.ex2[1] = env.fog_color.y;
+        tc.ex2[2] = env.fog_color.z;
+        tc.ex3[0] = env.sun_color.x;
+        tc.ex3[1] = env.sun_color.y;
+        tc.ex3[2] = env.sun_color.z;
+    }
+    tc.ex2[3] = ps_r__rt_water_wave;
 
     const u32 slot = rt_begin_list();
     ID3D12DescriptorHeap* heaps[] = { rt_heap };
     rt_list->SetDescriptorHeaps(1, heaps);
     rt_list->SetComputeRootSignature(rt_rs);
     rt_list->SetPipelineState(rt_pso);
-    rt_list->SetComputeRoot32BitConstants(0, 40, &tc, 0);
+    rt_list->SetComputeRoot32BitConstants(0, 48, &tc, 0);
     rt_list->SetComputeRootShaderResourceView(1, rt_tlas->GetGPUVirtualAddress());
     rt_list->SetComputeRootDescriptorTable(2, rt_heap->GetGPUDescriptorHandleForHeapStart());
     {
@@ -1749,6 +1798,14 @@ bool DebugPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
     if (!ps_r__rt_debug)
         return false;
     return RunPass(device11, ctx1, color, depth, gbuffer, gbuffer_packed, false);
+}
+
+bool WaterReflections(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color,
+    ID3D11Texture2D* depth, ID3D11Texture2D* gbuffer, bool gbuffer_packed)
+{
+    if (!ps_r__rt_refl || ps_r__rt_debug || !rt_blas_w)
+        return false;
+    return RunPass(device11, ctx1, color, depth, gbuffer, gbuffer_packed, false, true);
 }
 
 bool SunMask(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* mask, ID3D11Texture2D* depth,

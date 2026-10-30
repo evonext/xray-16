@@ -445,6 +445,8 @@ void CRenderTarget::phase_combine()
             const ref_rt& gb = packed ? rt_Position : rt_Normal;
             rt::DebugPass(HW.pDevice, HW.pContext1, rt_Color->pSurface, rt_Base_Depth->pSurface,
                 (gb._get() && gb->pSurface) ? gb->pSurface : nullptr, packed);
+            rt::WaterReflections(HW.pDevice, HW.pContext1, rt_Color->pSurface, rt_Base_Depth->pSurface,
+                (gb._get() && gb->pSurface) ? gb->pSurface : nullptr, packed);
         }
     }
 
