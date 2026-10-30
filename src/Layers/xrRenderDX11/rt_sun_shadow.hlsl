@@ -233,7 +233,7 @@ void main(uint3 id : SV_DispatchThreadID)
             }
             lit = acc / float(ns);
         }
-        if (flags & 2u)
+        if ((flags & 2u) && dist < 40.0) // AO only near the camera: far ambient is baked anyway
         {
             // AO: cosine-weighted hemisphere around the smooth normal, hits weighted by proximity
             const uint na = max(1u, uint(ex0.w));
