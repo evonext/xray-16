@@ -367,6 +367,8 @@ bool rt_collect_visuals(RtMesh& out)
     if (r.Visuals.empty() || r.nVB.empty() || r.nIB.empty())
         return false;
 
+    Msg("* [RT] reading level.geom ...");
+    FlushLog();
     CStreamReader* geom = FS.rs_open("$level$", "level.geom");
     if (!geom)
     {
@@ -385,6 +387,8 @@ bool rt_collect_visuals(RtMesh& out)
             return false;
         }
         const u32 count = fs->r_u32();
+        Msg("* [RT] level.geom: %u vertex buffers", count);
+        FlushLog();
         vbs.resize(count);
         constexpr size_t buffer_size = (MAXD3DDECLLENGTH + 1) * sizeof(VertexElement);
         for (u32 n = 0; n < count; ++n)
@@ -415,6 +419,8 @@ bool rt_collect_visuals(RtMesh& out)
             return false;
         }
         const u32 icount = fs->r_u32();
+        Msg("* [RT] level.geom: %u index buffers", icount);
+        FlushLog();
         ibs.resize(icount);
         for (u32 n = 0; n < icount; ++n)
         {
@@ -425,6 +431,8 @@ bool rt_collect_visuals(RtMesh& out)
         fs->close();
     }
     FS.r_close(geom);
+    Msg("* [RT] level.geom read, collecting visuals (%u)", u32(r.Visuals.size()));
+    FlushLog();
 
     auto add = [&](Fvisual* f, u32 idx_first, u32 tris)
     {
@@ -514,6 +522,8 @@ bool rt_collect_visuals(RtMesh& out)
 
     for (dxRender_Visual* v : r.Visuals)
         visit(visit, v);
+    Msg("* [RT] visuals collected");
+    FlushLog();
     return !out.i.empty();
 }
 
@@ -1014,6 +1024,7 @@ void Tick(ID3D11Device* device11)
         Msg("* [RT] visible geometry: %u visuals, %u tris, %u verts (skipped: %u alpha-tested, %u other), %u ms",
             mesh.visuals, u32(mesh.i.size() / 3), u32(mesh.v.size()), mesh.skipped_aref, mesh.skipped_other,
             u32(t.GetElapsed_ms()));
+        FlushLog();
         ok = got && rt_build(mesh.v.data(), u32(mesh.v.size()), mesh.i.data(), u32(mesh.i.size() / 3));
         rt_built_key = key;
         rt_built_any = true;
