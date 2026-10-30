@@ -54,6 +54,9 @@ bool GetRenderSize(ID3D11Device* device, u32 outW, u32 outH, u32& rw, u32& rh);
 void BeginRenderRes(u32 rw, u32 rh);
 void EndRenderRes();
 bool InRenderRes();
+// Pixel count of the output (display) resolution while the scene is rendered at the lower DLSS resolution, else 0.
+// LOD thresholds use it: they must not shrink with the render resolution.
+u32 OutputPixels();
 
 void Shutdown(ID3D11Device* device);
 

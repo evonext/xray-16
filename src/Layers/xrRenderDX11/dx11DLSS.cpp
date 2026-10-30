@@ -4,9 +4,11 @@
 #if defined(XR_DLSS)
 
 #include "dx11DLSS.h"
+#include "StateManager/dx11SamplerStateCache.h"
 #include "Layers/xrRender/xrRender_console.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
@@ -513,13 +515,28 @@ bool Evaluate(ID3D11Device* device, ID3D11DeviceContext1* ctx1, const FrameInput
     return ok;
 }
 
+// Texture LOD bias under DLSS: log2(render / output) - 1 (NVIDIA's recommendation), added to r2_tf_mipbias
+static float g_mip_bias_applied = 1000.f;
+static void ApplyMipBias(float bias)
+{
+    bias = std::max(-2.5f, std::min(0.f, bias));
+    if (std::fabs(bias - g_mip_bias_applied) < 1e-3f)
+        return;
+    g_mip_bias_applied = bias;
+    SSManager.SetMipLODBias(ps_r__tf_Mipbias + bias);
+    Msg("* [DLSS] texture mip bias %.2f", ps_r__tf_Mipbias + bias);
+}
+
 bool GetRenderSize(ID3D11Device* device, u32 outW, u32 outH, u32& rw, u32& rh)
 {
     rw = outW;
     rh = outH;
     const int mode = int(ps_r__dlss_mode);
     if (!ps_r__dlss || mode <= 0 || mode > 4 || !try_init(device))
+    {
+        ApplyMipBias(0.f);
         return false;
+    }
 
     unsigned int ow = 0, oh = 0, maxw = 0, maxh = 0, minw = 0, minh = 0;
     float sharpness = 0.f;
@@ -536,6 +553,7 @@ bool GetRenderSize(ID3D11Device* device, u32 outW, u32 outH, u32& rw, u32& rh)
     rw = ow;
     rh = oh;
     Msg("* [DLSS] %s: render %ux%u -> output %ux%u", MODE_NAMES[mode], rw, rh, outW, outH);
+    ApplyMipBias(rw != outW ? std::log2(float(rw) / float(outW)) - 1.f : 0.f);
     return rw != outW || rh != outH;
 }
 
@@ -560,6 +578,8 @@ void EndRenderRes()
 }
 
 bool InRenderRes() { return g_render_res; }
+
+u32 OutputPixels() { return g_render_res ? g_saved_w * g_saved_h : 0; }
 
 ID3D11Texture2D* LastMotionVectors() { return g_mv; }
 ID3D11Texture2D* LastDepth() { return g_zout; }

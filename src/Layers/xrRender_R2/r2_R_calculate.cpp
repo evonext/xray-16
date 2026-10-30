@@ -2,6 +2,9 @@
 
 #include "xrEngine/CustomHUD.h"
 #include "xrCore/Threading/TaskManager.hpp"
+#if defined(XR_DLSS) && defined(USE_DX11)
+#include "Layers/xrRenderDX11/dx11DLSS.h"
+#endif
 
 namespace xray::render::RENDER_NAMESPACE
 {
@@ -69,7 +72,12 @@ void CRender::Calculate()
 
     // Transfer to global space to avoid deep pointer access
     float fov_factor = _sqr(90.f / Device.fFOV);
-    g_fSCREEN = float(Target->get_width(RCache) * Target->get_height(RCache)) * fov_factor * (EPS_S + ps_r__LOD);
+    float pixels = float(Target->get_width(RCache) * Target->get_height(RCache));
+#if defined(XR_DLSS) && defined(USE_DX11)
+    if (const u32 out_pixels = dlss::OutputPixels()) // LOD by the display resolution, not the lower DLSS render one
+        pixels = float(out_pixels);
+#endif
+    g_fSCREEN = pixels * fov_factor * (EPS_S + ps_r__LOD);
     r_ssaDISCARD = _sqr(ps_r__ssaDISCARD) / g_fSCREEN;
     r_ssaDONTSORT = _sqr(ps_r__ssaDONTSORT / 3) / g_fSCREEN;
     r_ssaLOD_A = _sqr(ps_r2_ssaLOD_A / 3) / g_fSCREEN;
