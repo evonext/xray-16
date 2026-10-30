@@ -90,7 +90,7 @@ float trace_sun(float3 origin, float3 dir, float tmax)
     q.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
     while (q.Proceed())
     {
-        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE_HIT)
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
         {
             bool hit = true;
             if (alpha_thr > 0.0)
