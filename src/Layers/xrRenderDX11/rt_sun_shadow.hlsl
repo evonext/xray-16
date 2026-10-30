@@ -179,8 +179,8 @@ float3 water_normal(float3 pos, float amp, float t)
     float2 g = float2(0, 0);
     g += float2(0.8, 0.6) * cos(dot(pos.xz, float2(0.8, 0.6)) * 2.3 + t * 1.1);
     g += float2(-0.5, 0.86) * cos(dot(pos.xz, float2(-0.5, 0.86)) * 3.7 - t * 1.7) * 0.7;
-    g += float2(0.97, -0.25) * cos(dot(pos.xz, float2(0.97, -0.25)) * 6.1 + t * 2.3) * 0.5;
-    g += float2(-0.2, -0.98) * cos(dot(pos.xz, float2(-0.2, -0.98)) * 9.7 - t * 3.1) * 0.3;
+    g += float2(0.97, -0.25) * cos(dot(pos.xz, float2(0.97, -0.25)) * 6.1 + t * 2.3) * 0.3;
+    g += float2(-0.2, -0.98) * cos(dot(pos.xz, float2(-0.2, -0.98)) * 9.7 - t * 3.1) * 0.12;
     return normalize(float3(-g.x * amp, 1.0, -g.y * amp));
 }
 
@@ -247,14 +247,21 @@ void reflect_pixel(int2 p, float4 c)
     {
         const float tw = wq.CommittedRayT();
         const float3 pw = cam_pos + dir * tw;
-        const float3 n = water_normal(pw, ex2.w, ex1.w);
+        float3 n = water_normal(pw, ex2.w, ex1.w);
+        {
+            const float2 jn = float2(ign(float2(p), ex0.x), ign(float2(p) + 17.0, ex0.x)) - 0.5;
+            n = normalize(n + float3(jn.x, 0.0, jn.y) * 0.03);
+        }
         float3 r = reflect(dir, n);
         if (r.y < 0.02)
             r = normalize(float3(r.x, 0.02, r.z)); // never reflect into the water itself
         const float cosv = saturate(dot(-dir, n));
         const float fres = 0.10 + 0.90 * pow(1.0 - cosv, 3.0);
         const float3 refl = trace_refl(pw + n * 0.03, r);
-        const float k = saturate(fres * ex1.z * 1.3);
+        // soft shoreline: reflection fades out where the water gets shallow along the view ray
+        const float depth_w = (c.w > 0.5) ? (tgeo - tw) : 1.0;
+        const float edge = smoothstep(0.0, 0.5, depth_w);
+        const float k = saturate(fres * ex1.z * 1.3) * edge;
         u_out[p] = float4(lerp(sc.rgb, refl, k), sc.a);
         return;
     }
