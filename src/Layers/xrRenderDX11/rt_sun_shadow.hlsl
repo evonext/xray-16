@@ -290,6 +290,13 @@ void reflect_pixel(int2 p, float4 c)
     const float3 r = reflect(dir, n);
     if (r.y < 0.0)
         return;
+    // only surfaces that exist in the BVH: grass, detail objects and dynamic models are not there and
+    // their G-buffer normals (edge-on blades) would light up with a bogus sky-coloured Fresnel glow
+    {
+        float hb;
+        if (trace_sun(c.xyz - dir * 0.15, dir, 0.30, hb) > 0.5)
+            return;
+    }
     const float3 refl = trace_refl(c.xyz + n * 0.03, r);
     u_out[p] = float4(lerp(sc.rgb, refl, saturate(k)), sc.a);
 }
