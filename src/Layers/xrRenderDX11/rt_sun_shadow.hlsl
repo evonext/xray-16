@@ -28,7 +28,7 @@ cbuffer C : register(b0)
     float4 ex0; // x: frame, y: sun disk tan(half-angle), z: sun rays, w: AO rays
     float4 ex1; // x: AO radius (m), y: flags (bit0: sun, bit1: AO), z: reflection strength, w: time (s)
     float4 ex2; // rgb: fallback sky colour, w: water ripple amplitude
-    float4 ex3; // rgb: sun colour
+    float4 ex3; // rgb: sun colour, w: glossy surface reflection strength
 };
 
 RaytracingAccelerationStructure scene : register(t0);
@@ -190,44 +190,13 @@ float4 scene_at(int2 q)
     return t_color.Load(int3(q, 0));
 }
 
-void reflect_pixel(int2 p, float4 c)
+// colour seen along r from org: screen-space lookup of the RT hit point, fogged sky as fallback
+float3 trace_refl(float3 org, float3 r)
 {
-    const float4 sc = scene_at(p);
-    u_out[p] = sc;
-    if (abs(c.w - 2.0) < 0.01)
-        return; // HUD
-    const float3 dir = pixel_dir(p);
-    const float tgeo = c.w > 0.5 ? length(c.xyz - cam_pos) : 100000.0;
-
-    // water in front of the visible surface?
-    RayDesc wr;
-    wr.Origin = cam_pos;
-    wr.Direction = dir;
-    wr.TMin = 0.01;
-    wr.TMax = tgeo + 0.05;
-    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_CULL_NON_OPAQUE> wq;
-    wq.TraceRayInline(scene, RAY_FLAG_NONE, 0x02, wr);
-    while (wq.Proceed())
-    {
-    }
-    if (wq.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
-        return;
-    const float tw = wq.CommittedRayT();
-    const float3 pw = cam_pos + dir * tw;
-
-    const float3 n = water_normal(pw, ex2.w, ex1.w);
-    float3 r = reflect(dir, n);
-    if (r.y < 0.02)
-        r = normalize(float3(r.x, 0.02, r.z)); // never reflect into the water itself
-    const float cosv = saturate(dot(-dir, n));
-    const float fres = 0.10 + 0.90 * pow(1.0 - cosv, 3.0);
-
-    // reflected ray against the level
     float ht;
-    const float3 org = pw + n * 0.03;
     float3 refl = ex2.rgb; // fallback: fogged sky colour
     const float lit = trace_sun(org, r, 400.0, ht);
-    float3 target = org + r * (lit > 0.5 ? 4000.0 : ht);
+    const float3 target = org + r * (lit > 0.5 ? 4000.0 : ht);
     float2 px;
     float vz;
     bool got = false;
@@ -251,9 +220,71 @@ void reflect_pixel(int2 p, float4 c)
     // sun glint where the reflected ray leaves the scene towards the sun
     if (lit > 0.5)
         refl += ex3.rgb * pow(saturate(dot(r, sun_dir)), 1500.0) * 8.0;
+    return refl;
+}
 
-    const float k = saturate(fres * ex1.z * 1.3);
-    u_out[p] = float4(lerp(sc.rgb, refl, k), sc.a);
+void reflect_pixel(int2 p, float4 c)
+{
+    const float4 sc = scene_at(p);
+    u_out[p] = sc;
+    if (abs(c.w - 2.0) < 0.01)
+        return; // HUD
+    const float3 dir = pixel_dir(p);
+    const float tgeo = c.w > 0.5 ? length(c.xyz - cam_pos) : 100000.0;
+
+    // water in front of the visible surface?
+    RayDesc wr;
+    wr.Origin = cam_pos;
+    wr.Direction = dir;
+    wr.TMin = 0.01;
+    wr.TMax = tgeo + 0.05;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_CULL_NON_OPAQUE> wq;
+    wq.TraceRayInline(scene, RAY_FLAG_NONE, 0x02, wr);
+    while (wq.Proceed())
+    {
+    }
+    if (wq.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+    {
+        const float tw = wq.CommittedRayT();
+        const float3 pw = cam_pos + dir * tw;
+        const float3 n = water_normal(pw, ex2.w, ex1.w);
+        float3 r = reflect(dir, n);
+        if (r.y < 0.02)
+            r = normalize(float3(r.x, 0.02, r.z)); // never reflect into the water itself
+        const float cosv = saturate(dot(-dir, n));
+        const float fres = 0.10 + 0.90 * pow(1.0 - cosv, 3.0);
+        const float3 refl = trace_refl(pw + n * 0.03, r);
+        const float k = saturate(fres * ex1.z * 1.3);
+        u_out[p] = float4(lerp(sc.rgb, refl, k), sc.a);
+        return;
+    }
+
+    // glossy / wet ground: Fresnel sheen on solid surfaces (stronger in rain)
+    const float surf = ex3.w;
+    if (surf <= 0.001 || c.w < 0.5 || tgeo > 90.0)
+        return;
+    float3 n = -dir;
+    const float2 ne = t_n.Load(int3(p, 0));
+    if (dot(ne, ne) > 1e-8)
+    {
+        const float3 nv = oct_decode(ne);
+        n = normalize(nv.x * iv0.xyz + nv.y * iv1.xyz + nv.z * iv2.xyz);
+    }
+    if (dot(n, -dir) < 0.0)
+        n = -n;
+    const float cosv = saturate(dot(-dir, n));
+    const float fres = 0.04 + 0.96 * pow(1.0 - cosv, 5.0);
+    const float luma = dot(sc.rgb, float3(0.3, 0.59, 0.11));
+    // dark surfaces (wet, polished) show reflections, bright diffuse ones don't
+    float k = fres * surf * saturate(1.3 - luma * 2.5) * saturate(1.5 - tgeo / 60.0);
+    k *= saturate(n.y * 1.5 + 0.2); // mostly ground-like surfaces
+    if (k < 0.01)
+        return;
+    const float3 r = reflect(dir, n);
+    if (r.y < 0.0)
+        return;
+    const float3 refl = trace_refl(c.xyz + n * 0.03, r);
+    u_out[p] = float4(lerp(sc.rgb, refl, saturate(k)), sc.a);
 }
 
 [RootSignature(RS)]

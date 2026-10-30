@@ -75,6 +75,8 @@ extern ECORE_API int ps_r__rt_debug; // 0 off, 1 sun visibility, 2 G-buffer norm
 extern ECORE_API float ps_r__rt_aref; // alpha threshold of the ray traced alpha test (foliage)
 extern ECORE_API int ps_r__rt_refl; // 1 = ray traced reflections on water
 extern ECORE_API float ps_r__rt_refl_k;
+extern ECORE_API float ps_r__rt_gloss;
+extern ECORE_API float ps_r__rt_wet;
 extern ECORE_API float ps_r__rt_water_wave; // ripple amplitude of the reflected water normal
 extern ECORE_API int ps_r__rt_ao; // 1 = ray traced ambient occlusion (hemi ambient in combine)
 extern ECORE_API int ps_r__rt_ao_rays;

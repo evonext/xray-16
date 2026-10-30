@@ -1759,6 +1759,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
         tc.ex3[0] = env.sun_color.x;
         tc.ex3[1] = env.sun_color.y;
         tc.ex3[2] = env.sun_color.z;
+        tc.ex3[3] = ps_r__rt_gloss + env.rain_density * ps_r__rt_wet;
     }
     tc.ex2[3] = ps_r__rt_water_wave;
 
