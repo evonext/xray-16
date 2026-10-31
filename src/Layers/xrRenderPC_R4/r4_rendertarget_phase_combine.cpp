@@ -715,18 +715,98 @@ void CRenderTarget::phase_combine_volumetric()
     RCache.set_ColorWriteEnable();
 }
 #if defined(XR_DLSS)
+// Local lights (point / spot, static and dynamic: lamps, fires, the torch, artefacts) that get ray traced shadows.
+// Only lights without a shadow map are taken: RT shadows are new for them. The nearest ones win, 4 channels.
+void CRenderTarget::rt_select_local_lights()
+{
+    rt_local_n = 0;
+    rt_local_valid = false;
+    for (auto& l : rt_local_light)
+        l = nullptr;
+    if (!ps_r__rt_lights || !ps_r__rt || RImplementation.o.msaa || !rt_RTLocal._get() || !rt_RTLocal->pSurface)
+        return;
+
+    struct Cand
+    {
+        light* L;
+        float key;
+    };
+    static xr_vector<Cand> cand;
+    cand.clear();
+    const auto add = [&](const xr_vector<light*>& v)
+    {
+        for (light* L : v)
+        {
+            if (!L || L->range < 0.5f)
+                continue;
+            const float outside = std::max(0.f, L->position.distance_to(Device.vCameraPosition) - L->range);
+            if (outside > 25.f) // its lit area is far away from the camera
+                continue;
+            cand.push_back({ L, outside - 0.01f * L->range });
+        }
+    };
+    add(RImplementation.LP_normal.v_point);
+    add(RImplementation.LP_normal.v_spot);
+    add(RImplementation.LP_pending.v_point);
+    add(RImplementation.LP_pending.v_spot);
+    if (cand.empty())
+        return;
+    std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.key < b.key; });
+
+    rt::LocalLight ll[4];
+    for (const Cand& c : cand)
+    {
+        if (rt_local_n >= 4)
+            break;
+        rt_local_light[rt_local_n] = c.L;
+        ll[rt_local_n].pos[0] = c.L->position.x;
+        // lift the target a little: lights that sit on the ground (artefacts, fires) would shadow their own floor
+        ll[rt_local_n].pos[1] = c.L->position.y + 0.15f;
+        ll[rt_local_n].pos[2] = c.L->position.z;
+        ll[rt_local_n].range = c.L->range;
+        ll[rt_local_n].radius = ps_r__rt_light_size;
+        ++rt_local_n;
+    }
+
+    const bool packed = RImplementation.o.gbuffer_opt;
+    const ref_rt& gb = packed ? rt_Position : rt_Normal;
+    rt_local_valid = rt::LocalLights(HW.pDevice, HW.pContext1, rt_RTLocal->pSurface, rt_Base_Depth->pSurface,
+        (gb._get() && gb->pSurface) ? gb->pSurface : nullptr, packed, ll, rt_local_n);
+    if (!rt_local_valid)
+        rt_local_n = 0;
+}
+
+void CRenderTarget::rt_set_light_k(CBackend& cmd_list, light* L)
+{
+    float k = 0.f;
+    if (rt_local_valid)
+    {
+        for (u32 i = 0; i < rt_local_n; ++i)
+        {
+            if (rt_local_light[i] == L)
+            {
+                k = float(i + 1);
+                break;
+            }
+        }
+    }
+    cmd_list.set_c("rtl_k", k, 0.f, 0.f, 0.f);
+}
+
 void CRenderTarget::rt_sun_mask_update()
 {
     rt_sun_valid = false;
     rt_ao_valid = false;
-    if ((!ps_r__rt_sun && !ps_r__rt_ao) || RImplementation.o.msaa || !rt_RTSun._get() || !rt_RTSun->pSurface)
-        return;
-    const bool packed = RImplementation.o.gbuffer_opt;
-    const ref_rt& gb = packed ? rt_Position : rt_Normal;
-    const bool ok = rt::SunMask(HW.pDevice, HW.pContext1, rt_RTSun->pSurface, rt_Base_Depth->pSurface,
-        (gb._get() && gb->pSurface) ? gb->pSurface : nullptr, packed);
-    rt_sun_valid = ok && ps_r__rt_sun;
-    rt_ao_valid = ok && ps_r__rt_ao;
+    if ((ps_r__rt_sun || ps_r__rt_ao) && !RImplementation.o.msaa && rt_RTSun._get() && rt_RTSun->pSurface)
+    {
+        const bool packed = RImplementation.o.gbuffer_opt;
+        const ref_rt& gb = packed ? rt_Position : rt_Normal;
+        const bool ok = rt::SunMask(HW.pDevice, HW.pContext1, rt_RTSun->pSurface, rt_Base_Depth->pSurface,
+            (gb._get() && gb->pSurface) ? gb->pSurface : nullptr, packed);
+        rt_sun_valid = ok && ps_r__rt_sun;
+        rt_ao_valid = ok && ps_r__rt_ao;
+    }
+    rt_select_local_lights(); // after the sun pass: reuses its depth / normals
 }
 #endif
 

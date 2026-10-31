@@ -167,6 +167,8 @@ int ps_r__rt_refl = 0;
 float ps_r__rt_refl_k = 1.f;
 float ps_r__rt_gloss = 0.4f;
 float ps_r__rt_wet = 1.5f;
+int ps_r__rt_lights = 1; // ray traced shadows for local lights (point / spot): up to 4 nearest per frame
+float ps_r__rt_light_size = 0.12f; // radius of the light source for soft shadows, meters
 float ps_r__rt_water_wave = 0.03f;
 int ps_r__rt_ao = 0;
 int ps_r__rt_ao_rays = 2;
@@ -833,6 +835,8 @@ void xrRender_initconsole()
     CMD4(CCC_Float, "r__rt_refl_k", &ps_r__rt_refl_k, 0.f, 3.f);
     CMD4(CCC_Float, "r__rt_gloss", &ps_r__rt_gloss, 0.f, 2.f);
     CMD4(CCC_Float, "r__rt_wet", &ps_r__rt_wet, 0.f, 4.f);
+    CMD4(CCC_Integer, "r__rt_lights", &ps_r__rt_lights, 0, 1);
+    CMD4(CCC_Float, "r__rt_light_size", &ps_r__rt_light_size, 0.f, 1.f);
     CMD4(CCC_Float, "r__rt_water_wave", &ps_r__rt_water_wave, 0.f, 0.2f);
     CMD4(CCC_Integer, "r__rt_ao", &ps_r__rt_ao, 0, 1);
     CMD4(CCC_Integer, "r__rt_ao_rays", &ps_r__rt_ao_rays, 1, 16);

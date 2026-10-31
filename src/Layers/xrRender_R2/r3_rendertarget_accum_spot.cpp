@@ -199,6 +199,9 @@ void CRenderTarget::accum_spot(CBackend& cmd_list, light* L)
         float att_factor = 1.f / (att_R * att_R);
         cmd_list.set_c("Ldynamic_pos", L_pos.x, L_pos.y, L_pos.z, att_factor);
         cmd_list.set_c("Ldynamic_color", L_clr.x, L_clr.y, L_clr.z, L_spec);
+#if defined(XR_DLSS) && defined(USE_DX11)
+        rt_set_light_k(cmd_list, L);
+#endif
         cmd_list.set_c("m_texgen", m_Texgen);
         cmd_list.set_c("m_texgen_J", m_Texgen_J);
         cmd_list.set_c("m_shadow", m_Shadow);

@@ -111,6 +111,15 @@ ID3D12PipelineState* rt_pso = nullptr;
 ID3D12DescriptorHeap* rt_heap = nullptr;
 
 RtShared rt_s_z, rt_s_n, rt_s_out, rt_s_in;
+struct RtLightsCb // matches cbuffer L (b1) in rt_sun_shadow.hlsl
+{
+    float pos[4][4]; // xyz: world position, w: range (<= 0: slot unused)
+    float par[4][4]; // x: radius of the light source
+};
+ID3D12Resource* rt_light_cb[2] = {}; // upload buffers, one per command allocator slot
+u8* rt_light_cb_ptr[2] = {};
+RtLightsCb rt_local_data{};
+u32 rt_prep_frame = 0xFFFFFFFFu; // engine frame whose depth / normals are in the shared textures
 RtShared rt_s_alpha; // R8 array: alpha channel of the base texture of every alpha-tested material (any-hit)
 u32 rt_alpha_slices = 0;
 u32 rt_alpha_size = 0;
@@ -1162,6 +1171,20 @@ bool rt_dbg_init(ID3D11Device* device11, ID3D11DeviceContext1* ctx1)
     if (FAILED(rt_dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&rt_heap))))
         return false;
 
+    for (int i = 0; i < 2; ++i)
+    {
+        rt_light_cb[i] = rt_buffer(sizeof(RtLightsCb), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE,
+            D3D12_RESOURCE_STATE_GENERIC_READ);
+        if (!rt_light_cb[i])
+            return false;
+        const D3D12_RANGE none{ 0, 0 };
+        void* ptr = nullptr;
+        if (FAILED(rt_light_cb[i]->Map(0, &none, &ptr)))
+            return false;
+        rt_light_cb_ptr[i] = static_cast<u8*>(ptr);
+        std::memset(ptr, 0, sizeof(RtLightsCb));
+    }
+
     rt_write_alpha_descs();
     Msg("* [RT] debug pass ready (trace shader %u bytes)", u32(sizeof(g_rt_sun_shadow_cs)));
     return true;
@@ -1520,6 +1543,14 @@ void rt_dbg_shutdown()
     rt_rel(rt_heap);
     rt_rel(rt_pso);
     rt_rel(rt_rs);
+    for (int i = 0; i < 2; ++i)
+    {
+        if (rt_light_cb[i] && rt_light_cb_ptr[i])
+            rt_light_cb[i]->Unmap(0, nullptr);
+        rt_light_cb_ptr[i] = nullptr;
+        rt_rel(rt_light_cb[i]);
+    }
+    rt_prep_frame = 0xFFFFFFFFu;
     rt_rel(rt_state11);
     rt_rel(rt_prep_cb);
     rt_rel(rt_prep_cs);
@@ -1617,7 +1648,7 @@ void Tick(ID3D11Device* device11)
 
 // color: scene color (debug views) or, with mask_only, the R8 sun-visibility target (sized like the depth)
 static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
-    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool mask_only, bool refl = false)
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool mask_only, bool refl = false, bool local = false)
 {
     if (!ps_r__rt || !rt_ok || !rt_tlas || !color || !depth || !ctx1)
         return false;
@@ -1681,10 +1712,15 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     pc.opt[1] = rt_gb_srv ? 1.f : 0.f;
     pc.opt[2] = pc.opt[3] = 0.f;
 
+    // the local light pass runs right after the sun pass of the same frame and reuses its depth / normals
+    const bool do_prep = !local || rt_prep_frame != Device.dwFrame;
+    bool mapped = true;
+    if (do_prep)
+    {
     ID3DDeviceContextState* engine_state = nullptr;
     ctx1->SwapDeviceContextState(rt_state11, &engine_state);
     D3D11_MAPPED_SUBRESOURCE m;
-    const bool mapped = SUCCEEDED(ctx1->Map(rt_prep_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m));
+    mapped = SUCCEEDED(ctx1->Map(rt_prep_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m));
     if (mapped)
     {
         CopyMemory(m.pData, &pc, sizeof(pc));
@@ -1708,6 +1744,8 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     rt_rel(engine_state);
     if (!mapped)
         return false;
+    rt_prep_frame = Device.dwFrame;
+    }
     const u64 v_inputs = ++rt_fence_value;
     rt_ctx4->Signal(rt_fence11, v_inputs);
     ctx1->Flush();
@@ -1725,7 +1763,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     tc.sun[0] = sun.x;
     tc.sun[1] = sun.y;
     tc.sun[2] = sun.z;
-    tc.mode = mask_only ? 5u : (refl ? 7u : u32(ps_r__rt_debug));
+    tc.mode = local ? 9u : (mask_only ? 5u : (refl ? 7u : u32(ps_r__rt_debug)));
     tc.cam[0] = Device.vCameraPosition.x;
     tc.cam[1] = Device.vCameraPosition.y;
     tc.cam[2] = Device.vCameraPosition.z;
@@ -1764,6 +1802,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     tc.ex2[3] = ps_r__rt_water_wave;
 
     const u32 slot = rt_begin_list();
+    std::memcpy(rt_light_cb_ptr[slot], &rt_local_data, sizeof(rt_local_data)); // the slot's previous use is done
     ID3D12DescriptorHeap* heaps[] = { rt_heap };
     rt_list->SetDescriptorHeaps(1, heaps);
     rt_list->SetComputeRootSignature(rt_rs);
@@ -1776,6 +1815,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
         ha.ptr += u64(3) * rt_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         rt_list->SetComputeRootDescriptorTable(3, ha);
     }
+    rt_list->SetComputeRootConstantBufferView(4, rt_light_cb[slot]->GetGPUVirtualAddress());
     rt_list->Dispatch((dd.Width + 7) / 8, (dd.Height + 7) / 8, 1);
     const u64 v_done = rt_end_list(slot, v_inputs, false);
 
@@ -1815,6 +1855,23 @@ bool SunMask(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D
     if ((!ps_r__rt_sun && !ps_r__rt_ao) || ps_r__rt_debug)
         return false; // debug views use the shared output buffer in another format
     return RunPass(device11, ctx1, mask, depth, gbuffer, gbuffer_packed, true);
+}
+
+bool LocalLights(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* mask, ID3D11Texture2D* depth,
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, const LocalLight* lights, u32 count)
+{
+    if (!ps_r__rt_lights || ps_r__rt_debug || !lights || count == 0)
+        return false;
+    std::memset(&rt_local_data, 0, sizeof(rt_local_data));
+    for (u32 i = 0; i < count && i < 4; ++i)
+    {
+        rt_local_data.pos[i][0] = lights[i].pos[0];
+        rt_local_data.pos[i][1] = lights[i].pos[1];
+        rt_local_data.pos[i][2] = lights[i].pos[2];
+        rt_local_data.pos[i][3] = lights[i].range;
+        rt_local_data.par[i][0] = lights[i].radius;
+    }
+    return RunPass(device11, ctx1, mask, depth, gbuffer, gbuffer_packed, true, false, true);
 }
 
 void OnLevelUnload()

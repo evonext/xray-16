@@ -112,6 +112,9 @@ void CRenderTarget::accum_point(CBackend& cmd_list, light* L)
         // Constants
         cmd_list.set_c("Ldynamic_pos", L_pos.x, L_pos.y, L_pos.z, 1 / (L_R * L_R));
         cmd_list.set_c("Ldynamic_color", L_clr.x, L_clr.y, L_clr.z, L_spec);
+#if defined(XR_DLSS) && defined(USE_DX11)
+        rt_set_light_k(cmd_list, L);
+#endif
         cmd_list.set_c("m_texgen", m_Texgen);
 
         // Fetch4 : enable

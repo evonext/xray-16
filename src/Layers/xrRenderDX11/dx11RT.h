@@ -33,6 +33,17 @@ bool SunMask(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D
 // r__rt_refl: ray traced reflections on water surfaces, blended into the scene colour (after the combine pass).
 bool WaterReflections(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
     ID3D11Texture2D* gbuffer, bool gbuffer_packed);
+// r__rt_lights: ray traced shadows of up to 4 local lights (point / spot) into the RGBA8 target `mask`
+// (same size as the depth, one channel per light, 1 = the light reaches the pixel, 0 = blocked). Call right after
+// SunMask in the same frame: it reuses that pass's depth / normals.
+struct LocalLight
+{
+    float pos[3]; // world position
+    float range; // meters, the light does not reach farther
+    float radius; // radius of the light source, soft shadows
+};
+bool LocalLights(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* mask, ID3D11Texture2D* depth,
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, const LocalLight* lights, u32 count);
 void Shutdown();
 } // namespace rt
 } // namespace xray::render::RENDER_NAMESPACE

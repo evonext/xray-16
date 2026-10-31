@@ -7,8 +7,9 @@
 //          t_n    - G-buffer normal, view space, octahedral-encoded (0,0 = none)
 // Modes:   1 = sun visibility * N.L (grey), 2 = G-buffer normals (world), 3 = scene darkened where RT shadow,
 //          4 = normals reconstructed from depth, 5 = sun visibility only (R8 mask for the sun shader: 1 lit, 0 shadow)
+//          7 = water reflections, 9 = visibility of up to 4 local lights (RGBA8, one channel per light)
 
-#define RS "RootConstants(num32BitConstants=48, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0)), DescriptorTable(SRV(t3, numDescriptors=5)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT, addressU=TEXTURE_ADDRESS_WRAP, addressV=TEXTURE_ADDRESS_WRAP, addressW=TEXTURE_ADDRESS_WRAP)"
+#define RS "RootConstants(num32BitConstants=48, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0)), DescriptorTable(SRV(t3, numDescriptors=5)), CBV(b1), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT, addressU=TEXTURE_ADDRESS_WRAP, addressV=TEXTURE_ADDRESS_WRAP, addressW=TEXTURE_ADDRESS_WRAP)"
 
 cbuffer C : register(b0)
 {
@@ -29,6 +30,13 @@ cbuffer C : register(b0)
     float4 ex1; // x: AO radius (m), y: flags (bit0: sun, bit1: AO), z: reflection strength, w: time (s)
     float4 ex2; // rgb: fallback sky colour, w: water ripple amplitude
     float4 ex3; // rgb: sun colour, w: glossy surface reflection strength
+};
+
+// mode 9: local lights (point / spot), set by the engine every frame
+cbuffer L : register(b1)
+{
+    float4 l_pos[4]; // xyz: world position, w: range (<= 0: slot unused)
+    float4 l_par[4]; // x: radius of the light source (soft shadows)
 };
 
 RaytracingAccelerationStructure scene : register(t0);
@@ -301,6 +309,57 @@ void reflect_pixel(int2 p, float4 c)
     u_out[p] = float4(lerp(sc.rgb, refl, saturate(k)), sc.a);
 }
 
+// ---- mode 9: ray traced shadows of local lights ------------------------------------------------------
+// One ray per pixel and light, aimed at a random point of the light's source disk (soft penumbra, DLSS accumulates
+// it). Channel i = 1 where light i reaches the pixel, 0 where level geometry blocks it. Pixels outside the range,
+// facing away from the light, sky and HUD stay 1: the light shader has its own falloff and N.L there.
+void local_pixel(int2 p, float4 c)
+{
+    float4 res = float4(1.0, 1.0, 1.0, 1.0);
+    if (abs(c.w - 1.0) < 0.01)
+    {
+        const float3 to_cam = cam_pos - c.xyz;
+        const float dist = length(to_cam);
+        float3 n = to_cam / max(dist, 1e-4);
+        const float2 ne = t_n.Load(int3(p, 0));
+        if (dot(ne, ne) > 1e-8)
+        {
+            const float3 nv = oct_decode(ne);
+            n = normalize(nv.x * iv0.xyz + nv.y * iv1.xyz + nv.z * iv2.xyz);
+        }
+        if (dot(n, to_cam) < 0.0)
+            n = -n;
+        const float3 org = c.xyz + n * (bias * (1.0 + dist * 0.01));
+        [unroll]
+        for (uint i = 0; i < 4; ++i)
+        {
+            const float range = l_pos[i].w;
+            if (range <= 0.0)
+                continue;
+            const float3 to_l = l_pos[i].xyz - org;
+            const float d2 = dot(to_l, to_l);
+            if (d2 >= range * range)
+                continue;
+            const float3 ldir = to_l * rsqrt(max(d2, 1e-8));
+            if (dot(ldir, n) <= 0.0)
+                continue;
+            float3 lt, lb;
+            make_onb(ldir, lt, lb);
+            const float r1 = ign(float2(p) + float(i) * 11.0, ex0.x);
+            const float r2 = ign(float2(p) + float(i) * 29.0 + 5.0, ex0.x + 3.0);
+            const float rr = sqrt(r1) * l_par[i].x;
+            const float th = r2 * 6.2831853;
+            const float3 tgt = l_pos[i].xyz + (lt * cos(th) + lb * sin(th)) * rr;
+            float3 dv = tgt - org;
+            const float len = length(dv);
+            dv /= max(len, 1e-4);
+            float ht;
+            res[i] = trace_sun(org, dv, max(len - 0.1, 0.01), ht);
+        }
+    }
+    u_out[p] = res;
+}
+
 [RootSignature(RS)]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -314,6 +373,11 @@ void main(uint3 id : SV_DispatchThreadID)
     if (mode == 7)
     {
         reflect_pixel(p, c);
+        return;
+    }
+    if (mode == 9)
+    {
+        local_pixel(p, c);
         return;
     }
     float4 scene_col = float4(0, 0, 0, 1);
