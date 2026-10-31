@@ -245,14 +245,30 @@ bool project_px(float3 w, out float2 px, out float vz)
     return true;
 }
 
-float3 water_normal(float3 pos, float amp, float t)
+// Ripples: 8 travelling waves with scattered directions and non-harmonic wavelengths, on a slowly warped domain,
+// so no straight repeating bands appear. fp = size of one pixel on the water (m, stretched at grazing angles):
+// a wave shorter than a few pixels cannot be shown and only produces moire, so it fades out (like a mip chain),
+// and the far water turns calm instead of striped.
+float3 water_normal(float3 pos, float amp, float t, float fp)
 {
-    // cheap ripples: a few travelling sine waves
+    float2 x = pos.xz;
+    x += 0.9 * float2(sin(dot(pos.xz, float2(0.13, 0.21)) + t * 0.11), sin(dot(pos.xz, float2(-0.19, 0.12)) - t * 0.09));
     float2 g = float2(0, 0);
-    g += float2(0.8, 0.6) * cos(dot(pos.xz, float2(0.8, 0.6)) * 2.3 + t * 1.1);
-    g += float2(-0.5, 0.86) * cos(dot(pos.xz, float2(-0.5, 0.86)) * 3.7 - t * 1.7) * 0.7;
-    g += float2(0.97, -0.25) * cos(dot(pos.xz, float2(0.97, -0.25)) * 6.1 + t * 2.3) * 0.3;
-    g += float2(-0.2, -0.98) * cos(dot(pos.xz, float2(-0.2, -0.98)) * 9.7 - t * 3.1) * 0.12;
+    float wsum = 0.0;
+    [unroll]
+    for (uint i = 0; i < 8; ++i)
+    {
+        const float fi = float(i);
+        const float ang = fi * 2.39996323 + 0.7; // golden angle: directions never line up
+        const float2 d = float2(cos(ang), sin(ang));
+        const float k = 1.6 * pow(1.47, fi); // wave number, 1/m (wavelength 3.9 m .. 0.26 m)
+        const float a = 1.0 / (1.0 + fi * 0.9); // shorter waves are weaker
+        const float lod = saturate(1.6 - k * fp * 1.2); // fade when the wave spans < ~5 pixels
+        const float ph = fi * 1.7 + sin(fi * 3.1) * 2.0;
+        g += d * (a * lod * cos(dot(x, d) * k + ph + t * sqrt(9.8 * k) * 0.35));
+        wsum += a;
+    }
+    g *= 2.2 / wsum;
     return normalize(float3(-g.x * amp, 1.0, -g.y * amp));
 }
 
@@ -319,7 +335,10 @@ void reflect_pixel(int2 p, float4 c)
     {
         const float tw = wq.CommittedRayT();
         const float3 pw = cam_pos + dir * tw;
-        float3 n = water_normal(pw, ex2.w, ex1.w);
+        // pixel footprint on the water: distance x pixel angle, stretched by 1 / cos of the view angle
+        const float px_ang = 2.0 / (float(height) * proj.y);
+        const float fp = tw * px_ang / max(abs(dir.y), 0.04);
+        float3 n = water_normal(pw, ex2.w, ex1.w, fp);
         {
             const float2 jn = float2(ign(float2(p), ex0.x), ign(float2(p) + 17.0, ex0.x)) - 0.5;
             n = normalize(n + float3(jn.x, 0.0, jn.y) * 0.03);
