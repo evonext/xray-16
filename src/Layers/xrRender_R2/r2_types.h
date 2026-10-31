@@ -18,6 +18,7 @@ namespace xray::render::RENDER_NAMESPACE
 #define     r2_RT_rtsun         "$user$rtsun"       // --- RGBA8, ray traced sun visibility (r) and ambient occlusion (g)
 #define     r2_RT_rtlocal       "$user$rtlocal"     // --- RGBA8, ray traced visibility of up to 4 local lights (one per channel)
 #define     r2_RT_rtlocal2      "$user$rtlocal2"    // --- RGBA8, lights 5..8
+#define     r2_RT_rtgi          "$user$rtgi"       // --- RGBA8, path traced indirect light (rgb: bounced, a: sky visibility)
 #define     r2_RT_accum_temp    "$user$accum_temp"  // --- 16 bit fp - only for HW which doesn't feature fp16 blend
 
 #define     r2_T_envs0          "$user$env_s0"

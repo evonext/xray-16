@@ -41,8 +41,13 @@ struct LocalLight
     float pos[3]; // world position
     float range; // meters, the light does not reach farther
     float radius; // radius of the light source, soft shadows
+    float color[3]; // light colour (used by path tracing)
 };
 bool LocalLights(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* mask, ID3D11Texture2D* depth,
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, const LocalLight* lights, u32 count);
+// r__pt: path traced indirect light into the RGBA8 target (rgb = sqrt(bounced light / 2), a = 0.01 + 0.99 * sky
+// visibility, a = 0: not available for the pixel). The nearest local lights (up to 4) take part. Call after SunMask.
+bool PathTrace(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* target, ID3D11Texture2D* depth,
     ID3D11Texture2D* gbuffer, bool gbuffer_packed, const LocalLight* lights, u32 count);
 // r__rt_denoise: depth / normal aware blur of an RGBA8 mask that a previous pass of this frame wrote
 bool Denoise(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* mask, ID3D11Texture2D* depth,

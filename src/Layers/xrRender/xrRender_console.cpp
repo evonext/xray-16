@@ -172,6 +172,12 @@ float ps_r__rt_light_size = 0.24f;
 int ps_r__rt_denoise = 1; // blur of the RT sun / AO / light masks (depth and normal aware)
 int ps_r__rt_npc = 1; // characters (NPCs) cast RT shadows as capsules // radius of the light source for soft shadows, meters
 float ps_r__rt_water_wave = 0.03f;
+int ps_r__pt = 1; // path tracing: indirect light (replaces the baked hemisphere light in combine)
+int ps_r__pt_bounces = 2;
+int ps_r__pt_spp = 1; // paths per pixel and frame
+float ps_r__pt_k = 1.f; // blend with the baked hemisphere light (1 = fully path traced)
+float ps_r__pt_gi = 1.f; // brightness of the bounced light
+float ps_r__pt_dist = 120.f; // max length of a path segment, meters
 int ps_r__rt_ao = 0;
 int ps_r__rt_ao_rays = 2;
 float ps_r__rt_ao_radius = 1.5f;
@@ -842,6 +848,12 @@ void xrRender_initconsole()
     CMD4(CCC_Integer, "r__rt_denoise", &ps_r__rt_denoise, 0, 1);
     CMD4(CCC_Integer, "r__rt_npc", &ps_r__rt_npc, 0, 1);
     CMD4(CCC_Float, "r__rt_water_wave", &ps_r__rt_water_wave, 0.f, 0.2f);
+    CMD4(CCC_Integer, "r__pt", &ps_r__pt, 0, 1);
+    CMD4(CCC_Integer, "r__pt_bounces", &ps_r__pt_bounces, 1, 4);
+    CMD4(CCC_Integer, "r__pt_spp", &ps_r__pt_spp, 1, 8);
+    CMD4(CCC_Float, "r__pt_k", &ps_r__pt_k, 0.f, 1.f);
+    CMD4(CCC_Float, "r__pt_gi", &ps_r__pt_gi, 0.f, 4.f);
+    CMD4(CCC_Float, "r__pt_dist", &ps_r__pt_dist, 10.f, 500.f);
     CMD4(CCC_Integer, "r__rt_ao", &ps_r__rt_ao, 0, 1);
     CMD4(CCC_Integer, "r__rt_ao_rays", &ps_r__rt_ao_rays, 1, 16);
     CMD4(CCC_Float, "r__rt_ao_radius", &ps_r__rt_ao_radius, 0.1f, 10.f);

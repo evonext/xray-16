@@ -207,6 +207,7 @@ void CRenderTarget::phase_combine()
         RCache.set_c("m_v2w", Device.mInvView);
 #if defined(XR_DLSS)
         RCache.set_c("rtao_k", rt_ao_valid ? ps_r__rt_ao_k : 0.f, 0.f, 0.f, 0.f); // ray traced AO strength
+        RCache.set_c("rtgi_k", rt_pt_valid ? ps_r__pt_k : 0.f, ps_r__pt_gi, 0.f, 0.f); // path traced indirect light
 #endif
         RCache.set_c("L_ambient", ambclr);
 
@@ -782,6 +783,9 @@ void CRenderTarget::rt_select_local_lights()
         ll[rt_local_n].pos[2] = c.L->position.z;
         ll[rt_local_n].range = c.L->range;
         ll[rt_local_n].radius = ps_r__rt_light_size;
+        ll[rt_local_n].color[0] = c.L->color.r;
+        ll[rt_local_n].color[1] = c.L->color.g;
+        ll[rt_local_n].color[2] = c.L->color.b;
         ++rt_local_n;
     }
 
@@ -838,6 +842,37 @@ void CRenderTarget::rt_sun_mask_update()
         rt_ao_valid = ok && ps_r__rt_ao;
     }
     rt_select_local_lights(); // after the sun pass: reuses its depth / normals
+    rt_pt_update();
+}
+
+// Path traced indirect light (the nearest 4 local lights take part as emitters)
+void CRenderTarget::rt_pt_update()
+{
+    rt_pt_valid = false;
+    if (!ps_r__pt || !ps_r__rt || RImplementation.o.msaa || !rt_RTGI._get() || !rt_RTGI->pSurface)
+        return;
+    rt::LocalLight ll[4];
+    u32 n = 0;
+    for (u32 i = 0; rt_local_valid && i < rt_local_n && i < 4; ++i)
+    {
+        const light* L = rt_local_light[i];
+        ll[n].pos[0] = L->position.x;
+        ll[n].pos[1] = L->position.y + 0.15f;
+        ll[n].pos[2] = L->position.z;
+        ll[n].range = L->range;
+        ll[n].radius = ps_r__rt_light_size;
+        ll[n].color[0] = L->color.r;
+        ll[n].color[1] = L->color.g;
+        ll[n].color[2] = L->color.b;
+        ++n;
+    }
+    const bool packed = RImplementation.o.gbuffer_opt;
+    const ref_rt& gb = packed ? rt_Position : rt_Normal;
+    ID3D11Texture2D* gbs = (gb._get() && gb->pSurface) ? gb->pSurface : nullptr;
+    const bool ok = rt::PathTrace(HW.pDevice, HW.pContext1, rt_RTGI->pSurface, rt_Base_Depth->pSurface, gbs, packed, ll, n);
+    if (ok)
+        rt::Denoise(HW.pDevice, HW.pContext1, rt_RTGI->pSurface, rt_Base_Depth->pSurface, gbs, packed);
+    rt_pt_valid = ok;
 }
 #endif
 

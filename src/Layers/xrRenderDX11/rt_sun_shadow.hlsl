@@ -8,8 +8,9 @@
 // Modes:   1 = sun visibility * N.L (grey), 2 = G-buffer normals (world), 3 = scene darkened where RT shadow,
 //          4 = normals reconstructed from depth, 5 = sun visibility only (R8 mask for the sun shader: 1 lit, 0 shadow)
 //          7 = water reflections, 9 = visibility of up to 4 local lights (RGBA8, one channel per light)
+//          11 = path traced indirect light (RGBA8: rgb = sqrt(bounced light / 2), a = 0.01 + 0.99 * sky visibility)
 
-#define RS "RootConstants(num32BitConstants=48, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0)), DescriptorTable(SRV(t3, numDescriptors=5)), CBV(b1), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT, addressU=TEXTURE_ADDRESS_WRAP, addressV=TEXTURE_ADDRESS_WRAP, addressW=TEXTURE_ADDRESS_WRAP)"
+#define RS "RootConstants(num32BitConstants=48, b0), SRV(t0), DescriptorTable(SRV(t1, numDescriptors=2), UAV(u0)), DescriptorTable(SRV(t3, numDescriptors=11)), CBV(b1), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT, addressU=TEXTURE_ADDRESS_WRAP, addressV=TEXTURE_ADDRESS_WRAP, addressW=TEXTURE_ADDRESS_WRAP)"
 
 cbuffer C : register(b0)
 {
@@ -39,6 +40,10 @@ cbuffer L : register(b1)
     float4 l_par[4]; // x: radius of the light source (soft shadows)
     float4 cap_a[16]; // dynamic occluders (characters): xyz capsule segment start, w radius (<= 0: unused)
     float4 cap_b[16]; // xyz capsule segment end
+    float4 l_col[4]; // rgb: light colour (mode 11)
+    float4 pt_a; // x: bounces, y: paths per pixel, z: max path segment length, w: local light strength
+    float4 pt_b; // rgb: sun colour, w: sun strength
+    float4 pt_c; // rgb: average sky radiance (secondary bounces)
 };
 
 RaytracingAccelerationStructure scene : register(t0);
@@ -50,6 +55,13 @@ ByteAddressBuffer b_uv : register(t4);
 ByteAddressBuffer b_idx : register(t5);
 ByteAddressBuffer b_slice : register(t6);
 Texture2D<float4> t_color : register(t7); // copy of the scene colour (mode 7)
+// path tracing (mode 11): geometry of the hit points and the average colour of each material
+ByteAddressBuffer b_ov : register(t8); // opaque vertices (float3)
+ByteAddressBuffer b_oi : register(t9); // opaque indices
+ByteAddressBuffer b_om : register(t10); // opaque triangle -> material
+ByteAddressBuffer b_av : register(t11); // alpha-tested vertices (float3); its indices / alpha are b_idx
+ByteAddressBuffer b_am : register(t12); // alpha-tested triangle -> material
+Texture2D<float4> t_alb : register(t13); // average colour per material (n x 1)
 SamplerState smp : register(s0);
 
 float3 oct_decode(float2 e)
@@ -454,6 +466,230 @@ void denoise_pixel(int2 p, float4 c)
     u_out[p] = acc / wsum;
 }
 
+// ---- mode 11: path traced indirect light --------------------------------------------------------------
+// Cosine-sampled paths from the visible surface. A ray that leaves the scene at once counts as sky visibility (a),
+// the light that bounced surfaces send back (sun, nearby lamps, further bounces) is summed into rgb. combine_1.ps
+// puts the engine's sky colour on the visibility and adds the bounced light on top of it.
+static uint g_rng;
+
+uint pcg_hash(uint v)
+{
+    const uint st = v * 747796405u + 2891336453u;
+    const uint w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+float rnd()
+{
+    g_rng = pcg_hash(g_rng);
+    return float(g_rng >> 8) * (1.0 / 16777216.0);
+}
+
+float3 cosine_dir(float3 n, float u1, float u2)
+{
+    float3 t, b;
+    make_onb(n, t, b);
+    const float r = sqrt(u1);
+    const float th = 6.2831853 * u2;
+    return normalize(t * (r * cos(th)) + b * (r * sin(th)) + n * sqrt(max(0.0, 1.0 - u1)));
+}
+
+// nearest hit: distance, geometric normal (facing the ray), average colour of the material
+bool trace_closest(float3 org, float3 dir, float tmax, out float t, out float3 nrm, out float3 alb)
+{
+    RayDesc ray;
+    ray.Origin = org;
+    ray.Direction = dir;
+    ray.TMin = 0.0;
+    ray.TMax = tmax;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(scene, RAY_FLAG_NONE, 0x01, ray);
+    while (q.Proceed())
+    {
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
+        {
+            bool hit = true;
+            if (alpha_thr > 0.0)
+            {
+                const uint tri = q.CandidatePrimitiveIndex();
+                const uint slice = b_slice.Load(tri * 4);
+                if (slice != 0xFFFFFFFFu)
+                {
+                    const uint3 ix = b_idx.Load3(tri * 12);
+                    const float2 uv0 = asfloat(b_uv.Load2(ix.x * 8));
+                    const float2 uv1 = asfloat(b_uv.Load2(ix.y * 8));
+                    const float2 uv2 = asfloat(b_uv.Load2(ix.z * 8));
+                    const float2 bc = q.CandidateTriangleBarycentrics();
+                    const float2 uv = uv0 * (1.0 - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y;
+                    hit = t_alpha.SampleLevel(smp, float3(uv, float(slice)), 0) >= alpha_thr;
+                }
+            }
+            if (hit)
+                q.CommitNonOpaqueTriangleHit();
+        }
+    }
+    t = tmax;
+    nrm = float3(0, 1, 0);
+    alb = float3(0.4, 0.4, 0.4);
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+        return false;
+    t = q.CommittedRayT();
+    const uint tri = q.CommittedPrimitiveIndex();
+    float3 p0, p1, p2;
+    uint mat;
+    if (q.CommittedInstanceID() == 1)
+    {
+        const uint3 ix = b_idx.Load3(tri * 12);
+        p0 = asfloat(b_av.Load3(ix.x * 12));
+        p1 = asfloat(b_av.Load3(ix.y * 12));
+        p2 = asfloat(b_av.Load3(ix.z * 12));
+        mat = b_am.Load(tri * 4);
+    }
+    else
+    {
+        const uint3 ix = b_oi.Load3(tri * 12);
+        p0 = asfloat(b_ov.Load3(ix.x * 12));
+        p1 = asfloat(b_ov.Load3(ix.y * 12));
+        p2 = asfloat(b_ov.Load3(ix.z * 12));
+        mat = b_om.Load(tri * 4);
+    }
+    float3 gn = cross(p1 - p0, p2 - p0);
+    gn = gn / max(length(gn), 1e-12);
+    if (dot(gn, dir) > 0.0)
+        gn = -gn;
+    nrm = gn;
+    if (mat != 0xFFFFFFFFu)
+        alb = t_alb.Load(int3(mat, 0, 0)).rgb;
+    return true;
+}
+
+// light that reaches point p (normal n): sun and one random local light, both with a shadow ray; times albedo later
+float3 direct_light(float3 p, float3 n)
+{
+    float3 e = float3(0, 0, 0);
+    float ht;
+    const float ndl = dot(n, sun_dir);
+    if (ndl > 0.0 && pt_b.w > 0.0)
+        e += pt_b.rgb * (pt_b.w * ndl * trace_sun(p + n * 0.03, sun_dir, 500.0, ht));
+    uint cnt = 0;
+    [unroll]
+    for (uint i = 0; i < 4; ++i)
+        cnt += l_pos[i].w > 0.0 ? 1u : 0u;
+    if (cnt > 0u && pt_a.w > 0.0)
+    {
+        uint pick = min(uint(rnd() * float(cnt)), cnt - 1u);
+        uint idx = 0;
+        [unroll]
+        for (uint j = 0; j < 4; ++j)
+        {
+            if (l_pos[j].w > 0.0)
+            {
+                if (pick == 0u)
+                    idx = j;
+                pick = pick > 0u ? pick - 1u : 0xFFFFFFFFu;
+            }
+        }
+        const float range = l_pos[idx].w;
+        const float3 to_l = l_pos[idx].xyz - p;
+        const float d2 = dot(to_l, to_l);
+        if (d2 < range * range)
+        {
+            const float d = sqrt(d2);
+            const float3 ld = to_l / max(d, 1e-4);
+            const float nl = dot(n, ld);
+            if (nl > 0.0)
+            {
+                const float att = saturate(1.0 - d2 / (range * range));
+                e += l_col[idx].rgb * (float(cnt) * pt_a.w * nl * att * att *
+                    trace_sun(p + n * 0.03, ld, max(d - 0.1, 0.01), ht));
+            }
+        }
+    }
+    return e;
+}
+
+void pt_pixel(int2 p, float4 c)
+{
+    if (abs(c.w - 2.0) < 0.01)
+    {
+        u_out[p] = float4(0, 0, 0, 0); // HUD: no data, combine keeps the baked light
+        return;
+    }
+    if (c.w < 0.5)
+    {
+        u_out[p] = float4(0, 0, 0, 1);
+        return;
+    }
+    // surfaces that are not in the BVH (grass, models, NPCs): no data
+    const float3 vdir = pixel_dir(p);
+    float hb;
+    if (trace_sun(c.xyz - vdir * 0.15, vdir, 0.30, hb) > 0.5)
+    {
+        u_out[p] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    const float3 dx = pick_delta(c, load_pos(p + int2(1, 0)), load_pos(p - int2(1, 0)));
+    const float3 dy = pick_delta(c, load_pos(p + int2(0, 1)), load_pos(p - int2(0, 1)));
+    float3 n_geo = cross(dy, dx);
+    const float3 to_cam = cam_pos - c.xyz;
+    const float nl0 = length(n_geo);
+    n_geo = nl0 < 1e-8 ? normalize(to_cam) : n_geo / nl0;
+    if (dot(n_geo, to_cam) < 0)
+        n_geo = -n_geo;
+    float3 n = n_geo;
+    const float2 ne = t_n.Load(int3(p, 0));
+    if (dot(ne, ne) > 1e-8)
+    {
+        const float3 nv = oct_decode(ne);
+        n = normalize(nv.x * iv0.xyz + nv.y * iv1.xyz + nv.z * iv2.xyz);
+        if (dot(n, to_cam) < 0.0)
+            n = -n;
+    }
+    const float dist = length(to_cam);
+    const float3 org = c.xyz + n_geo * (bias * (1.0 + dist * 0.01) + 0.02);
+
+    g_rng = pcg_hash(uint(p.x) + uint(p.y) * 7919u + uint(ex0.x) * 104729u);
+    const uint spp = max(1u, uint(pt_a.y));
+    const uint nb = clamp(uint(pt_a.x), 1u, 4u);
+    float3 bounced = float3(0, 0, 0);
+    float vis_sky = 0.0;
+    for (uint sidx = 0; sidx < spp; ++sidx)
+    {
+        float3 o = org;
+        float3 dir = cosine_dir(n, rnd(), rnd());
+        if (dot(dir, n_geo) < 0.05)
+            dir = normalize(dir + n_geo * 0.6);
+        float3 thr = float3(1, 1, 1);
+        [loop]
+        for (uint b = 0; b < nb; ++b)
+        {
+            float t;
+            float3 hn, ha;
+            if (!trace_closest(o, dir, pt_a.z, t, hn, ha))
+            {
+                if (b == 0u)
+                    vis_sky += 1.0;
+                else
+                    bounced += thr * pt_c.rgb; // sky seen from a bounce point
+                break;
+            }
+            const float3 hp = o + dir * t;
+            bounced += thr * ha * direct_light(hp, hn);
+            thr *= ha;
+            if (b + 1u == nb)
+            {
+                bounced += thr * pt_c.rgb * 0.35; // path cut: the sky half of the hemisphere is assumed
+                break;
+            }
+            o = hp + hn * 0.03;
+            dir = cosine_dir(hn, rnd(), rnd());
+        }
+    }
+    const float inv = 1.0 / float(spp);
+    u_out[p] = float4(sqrt(saturate(bounced * inv * 0.5)), 0.01 + 0.99 * vis_sky * inv);
+}
+
 [RootSignature(RS)]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -477,6 +713,11 @@ void main(uint3 id : SV_DispatchThreadID)
     if (mode == 10)
     {
         denoise_pixel(p, c);
+        return;
+    }
+    if (mode == 11)
+    {
+        pt_pixel(p, c);
         return;
     }
     float4 scene_col = float4(0, 0, 0, 1);

@@ -81,6 +81,12 @@ extern ECORE_API int ps_r__rt_lights;
 extern ECORE_API float ps_r__rt_light_size;
 extern ECORE_API int ps_r__rt_denoise;
 extern ECORE_API int ps_r__rt_npc;
+extern ECORE_API int ps_r__pt; // 1 = path traced indirect light
+extern ECORE_API int ps_r__pt_bounces;
+extern ECORE_API int ps_r__pt_spp;
+extern ECORE_API float ps_r__pt_k;
+extern ECORE_API float ps_r__pt_gi;
+extern ECORE_API float ps_r__pt_dist;
 extern ECORE_API float ps_r__rt_water_wave; // ripple amplitude of the reflected water normal
 extern ECORE_API int ps_r__rt_ao; // 1 = ray traced ambient occlusion (hemi ambient in combine)
 extern ECORE_API int ps_r__rt_ao_rays;

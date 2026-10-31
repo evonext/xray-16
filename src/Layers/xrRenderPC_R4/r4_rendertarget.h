@@ -57,6 +57,9 @@ public:
     ref_rt rt_Base_Depth_scene; // render-resolution depth (scene)
     ref_rt rt_DLSS_Out; // upscaled color, read by post-process instead of rt_Color
     ref_rt rt_RTSun; // R8, ray traced sun visibility (1 lit), read by the sun shader
+    ref_rt rt_RTGI; // RGBA8, path traced indirect light read by the combine pass
+    bool rt_pt_valid{}; // rt_RTGI holds this frame's result
+    void rt_pt_update();
     bool rt_ao_valid{}; // rt_RTSun.g holds this frame's ambient occlusion
     bool rt_sun_valid{}; // rt_RTSun holds this frame's mask
     ref_rt rt_RTLocal; // RGBA8, ray traced visibility of local lights 1..4, one per channel (1 = lit)

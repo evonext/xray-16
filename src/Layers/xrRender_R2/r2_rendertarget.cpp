@@ -336,6 +336,7 @@ CRenderTarget::CRenderTarget()
         rt_RTSun.create(r2_RT_rtsun, w, h, D3DFMT_A8B8G8R8, 1);
         rt_RTLocal.create(r2_RT_rtlocal, w, h, D3DFMT_A8B8G8R8, 1);
         rt_RTLocal2.create(r2_RT_rtlocal2, w, h, D3DFMT_A8B8G8R8, 1);
+        rt_RTGI.create(r2_RT_rtgi, w, h, D3DFMT_A8B8G8R8, 1);
 #endif
         rt_Generic_1.create(r2_RT_generic1, w, h, D3DFMT_A8R8G8B8, 1);
         rt_Generic.create(r2_RT_generic, w, h, D3DFMT_A8R8G8B8, 1);

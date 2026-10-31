@@ -72,6 +72,12 @@ ID3D12Resource* rt_blas_a = nullptr; // alpha-tested geometry (foliage, trees): 
 ID3D12Resource* rt_tlas = nullptr;
 ID3D12Resource* rt_a_uv = nullptr; // float2 per vertex of the alpha BLAS (raw SRV)
 ID3D12Resource* rt_a_idx = nullptr; // u32 per index
+// path tracing: geometry of the hit points (raw SRVs) and the material of each triangle
+ID3D12Resource* rt_o_v = nullptr; // float3 per vertex of the opaque BLAS
+ID3D12Resource* rt_o_i = nullptr; // u32 per index of the opaque BLAS
+ID3D12Resource* rt_o_mat = nullptr; // u32 per opaque triangle: material (index into the albedo table) or ~0
+ID3D12Resource* rt_a_v = nullptr; // float3 per vertex of the alpha-tested BLAS
+ID3D12Resource* rt_a_mat = nullptr; // u32 per alpha-tested triangle
 ID3D12Resource* rt_a_slice = nullptr; // u32 per triangle: slice of the alpha texture array
 u32 rt_a_tris = 0;
 const CDB::MODEL* rt_built_model = nullptr; // what the BVH was built from (collision mode)
@@ -119,11 +125,18 @@ struct RtLightsCb // matches cbuffer L (b1) in rt_sun_shadow.hlsl
     float par[4][4]; // x: radius of the light source
     float cap_a[16][4]; // dynamic occluders (characters) as capsules: xyz segment start, w radius (<= 0: unused)
     float cap_b[16][4]; // xyz segment end
+    float col[4][4]; // path tracing: rgb colour of each local light
+    float pt[3][4]; // path tracing: [0] bounces, spp, max distance, light strength; [1] sun rgb, strength; [2] sky rgb
 };
 ID3D12Resource* rt_light_cb[2] = {}; // upload buffers, one per command allocator slot
 u8* rt_light_cb_ptr[2] = {};
 RtLightsCb rt_local_data{};
 u32 rt_prep_frame = 0xFFFFFFFFu; // engine frame whose depth / normals are in the shared textures
+RtShared rt_s_alb; // RGBA8, n x 1: average colour of the base texture of every material (path tracing)
+u32 rt_alb_n = 0;
+ID3D11ComputeShader* rt_alb_cs = nullptr;
+ID3D11Buffer* rt_alb_cb = nullptr;
+ID3D11SamplerState* rt_alb_smp = nullptr;
 RtShared rt_s_alpha; // R8 array: alpha channel of the base texture of every alpha-tested material (any-hit)
 u32 rt_alpha_slices = 0;
 u32 rt_alpha_size = 0;
@@ -366,6 +379,13 @@ void rt_release_as()
     rt_rel(rt_a_uv);
     rt_rel(rt_a_idx);
     rt_rel(rt_a_slice);
+    rt_rel(rt_o_v);
+    rt_rel(rt_o_i);
+    rt_rel(rt_o_mat);
+    rt_rel(rt_a_v);
+    rt_rel(rt_a_mat);
+    rt_s_alb.release();
+    rt_alb_n = 0;
     rt_a_tris = 0;
     rt_alpha_release();
     if (rt_built_any)
@@ -392,6 +412,10 @@ struct RtMesh
     xr_vector<u32> ai;
     xr_vector<u32> aslice; // per triangle: index into tex, or RT_NO_SLICE (treated as opaque)
     xr_vector<CTexture*> tex;
+    // path tracing materials
+    xr_vector<u32> omat; // per opaque triangle: index into mtex or RT_NO_SLICE
+    xr_vector<u32> amat; // per alpha-tested triangle
+    xr_vector<CTexture*> mtex;
     // water
     xr_vector<Fvector> wv;
     xr_vector<u32> wi;
@@ -548,6 +572,29 @@ bool rt_collect_visuals(RtMesh& out)
     out.aslice.reserve(size_t(2) << 20);
 
     xr_map<CTexture*, u32> tex_slice;
+    xr_map<CTexture*, u32> mat_index;
+    // material of a visual for path tracing: index of its base texture in out.mtex
+    auto mat_of = [&](dxRender_Visual* vis) -> u32
+    {
+        CTexture* t = rt_base_texture(vis);
+        if (!t || t->isUser())
+            return RT_NO_SLICE;
+        auto it = mat_index.find(t);
+        if (it != mat_index.end())
+            return it->second;
+        if (out.mtex.size() >= 16000)
+            return RT_NO_SLICE;
+        if (!t->get_SRView())
+            t->Load();
+        u32 id = RT_NO_SLICE;
+        if (t->get_SRView())
+        {
+            id = u32(out.mtex.size());
+            out.mtex.push_back(t);
+        }
+        mat_index[t] = id;
+        return id;
+    };
 
     // tree: tc = raw * 1/quant; static: (raw + (T.a, B.a)/255) * 32/32768
     auto decode_uv = [&](const RtGeomVB& vb, u32 index, bool tree) -> Fvector2
@@ -648,7 +695,12 @@ bool rt_collect_visuals(RtMesh& out)
             if (to_water)
                 ++out.water_visuals;
             else
+            {
+                const u32 mat = mat_of(vis);
+                for (u32 k = 0; k < tris; ++k)
+                    out.omat.push_back(mat);
                 ++out.visuals;
+            }
             return;
         }
 
@@ -686,8 +738,14 @@ bool rt_collect_visuals(RtMesh& out)
             const u32 ix = ib[idx_first + k];
             out.ai.push_back(ix < vcount ? base + ix : base);
         }
-        for (u32 k = 0; k < tris; ++k)
-            out.aslice.push_back(slice);
+        {
+            const u32 mat = mat_of(vis);
+            for (u32 k = 0; k < tris; ++k)
+            {
+                out.aslice.push_back(slice);
+                out.amat.push_back(mat);
+            }
+        }
         ++out.alpha_visuals;
         if (tree)
             ++out.trees;
@@ -1052,6 +1110,30 @@ bool rt_build_scene(const Fvector* verts, u32 nv, const u32* tris, u32 nt, const
                 rt_a_tris = u32(mesh->ai.size() / 3);
         }
     }
+    if (mesh && blas_o && mesh->omat.size() == size_t(nt))
+    {
+        rt_o_v = rt_default_buffer(verts, u64(nv) * sizeof(Fvector));
+        rt_o_i = rt_default_buffer(tris, u64(nt) * 3 * sizeof(u32));
+        rt_o_mat = rt_default_buffer(mesh->omat.data(), u64(nt) * sizeof(u32));
+        if (!rt_o_v || !rt_o_i || !rt_o_mat)
+        {
+            Msg("! [RT] path tracing geometry buffers failed (opaque)");
+            rt_rel(rt_o_v);
+            rt_rel(rt_o_i);
+            rt_rel(rt_o_mat);
+        }
+    }
+    if (mesh && blas_a && rt_a_tris && mesh->amat.size() == size_t(rt_a_tris))
+    {
+        rt_a_v = rt_default_buffer(mesh->av.data(), u64(mesh->av.size()) * sizeof(Fvector));
+        rt_a_mat = rt_default_buffer(mesh->amat.data(), u64(mesh->amat.size()) * sizeof(u32));
+        if (!rt_a_v || !rt_a_mat)
+        {
+            Msg("! [RT] path tracing geometry buffers failed (alpha)");
+            rt_rel(rt_a_v);
+            rt_rel(rt_a_mat);
+        }
+    }
     if ((nv && nt && !blas_o) || (has_alpha && !blas_a))
     {
         rt_rel(blas_o);
@@ -1170,7 +1252,7 @@ bool rt_dbg_init(ID3D11Device* device11, ID3D11DeviceContext1* ctx1)
     }
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 8; // t1 depth, t2 normals, u0 output | t3 alpha array, t4 uv, t5 index, t6 slice, t7 scene colour copy
+    hd.NumDescriptors = 14; // t1 depth, t2 normals, u0 output | t3 alpha array, t4 uv, t5 index, t6 slice, t7 scene colour copy | t8..t13 path tracing
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(rt_dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&rt_heap))))
         return false;
@@ -1295,6 +1377,33 @@ void rt_write_alpha_descs()
         bd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         rt_dev->CreateShaderResourceView(b, &bd, h);
     }
+    // path tracing: t8..t12 raw buffers, t13 albedo table
+    D3D12_CPU_DESCRIPTOR_HANDLE h2 = rt_heap->GetCPUDescriptorHandleForHeapStart();
+    h2.ptr += size_t(8) * inc;
+    ID3D12Resource* pbufs[5] = { rt_o_v, rt_o_i, rt_o_mat, rt_a_v, rt_a_mat };
+    for (ID3D12Resource* b : pbufs)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC bd{};
+        bd.Format = DXGI_FORMAT_R32_TYPELESS;
+        bd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        bd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        bd.Buffer.NumElements = b ? u32(b->GetDesc().Width / 4) : 1;
+        bd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        rt_dev->CreateShaderResourceView(b, &bd, h2);
+        h2.ptr += inc;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC ad{};
+    ad.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ad.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    ad.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    ad.Texture2D.MipLevels = 1;
+    rt_dev->CreateShaderResourceView(rt_alb_n ? rt_s_alb.r12 : nullptr, &ad, h2);
+}
+
+// Path tracing needs every piece of the scene data
+bool rt_pt_ready()
+{
+    return rt_o_v && rt_o_i && rt_o_mat && rt_alb_n && rt_s_alb.t11 && (!rt_a_tris || (rt_a_v && rt_a_mat));
 }
 
 void rt_alpha_release()
@@ -1423,6 +1532,144 @@ bool rt_alpha_build(ID3D11Device* device11, const xr_vector<CTexture*>& tex)
     rt_alpha_size = size;
     rt_write_alpha_descs();
     Msg("* [RT] alpha textures: %u of %u converted (%ux%u), %u ms", done, n, size, size, u32(timer.GetElapsed_ms()));
+    return true;
+}
+
+// ---- average albedo of every material texture (path tracing) -------------------------------------
+constexpr const char* RT_ALB_CS = R"(
+cbuffer C : register(b0)
+{
+    uint idx;
+    uint3 pad;
+};
+Texture2D<float4> src : register(t0);
+SamplerState smp : register(s0);
+RWTexture2D<unorm float4> dst : register(u0);
+
+[numthreads(1, 1, 1)]
+void main()
+{
+    uint w, h, m;
+    src.GetDimensions(0, w, h, m);
+    const float lod = max(0.0, log2(float(max(w, h))) - 2.0);
+    float3 s = float3(0, 0, 0);
+    for (uint y = 0; y < 4; ++y)
+        for (uint x = 0; x < 4; ++x)
+            s += src.SampleLevel(smp, (float2(x, y) + 0.5) / 4.0, lod).rgb;
+    dst[uint2(idx, 0)] = float4(saturate(s / 16.0), 1.0);
+}
+)";
+
+bool rt_albedo_build(ID3D11Device* device11, const xr_vector<CTexture*>& tex)
+{
+    ID3D11DeviceContext1* ctx1 = HW.pContext1;
+    if (!ctx1 || tex.empty() || !rt_ok)
+        return false;
+    if (!rt_dbg_tried)
+    {
+        rt_dbg_tried = true;
+        rt_dbg_ok = rt_dbg_init(device11, ctx1);
+    }
+    if (!rt_dbg_ok)
+        return false;
+    const u32 n = u32(tex.size());
+    if (!rt_alb_cs)
+    {
+        ID3DBlob *blob = nullptr, *errors = nullptr;
+        HRESULT hr = D3DCompile(RT_ALB_CS, xr_strlen(RT_ALB_CS), "rt_albedo", nullptr, nullptr, "main", "cs_5_0",
+            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &blob, &errors);
+        if (FAILED(hr))
+        {
+            Msg("! [RT] albedo shader failed to compile: %s",
+                errors ? static_cast<const char*>(errors->GetBufferPointer()) : "?");
+            rt_rel(errors);
+            return false;
+        }
+        rt_rel(errors);
+        hr = device11->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &rt_alb_cs);
+        rt_rel(blob);
+        if (FAILED(hr))
+            return false;
+        D3D11_BUFFER_DESC cbd{};
+        cbd.ByteWidth = 16;
+        cbd.Usage = D3D11_USAGE_DYNAMIC;
+        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        sd.MaxLOD = D3D11_FLOAT32_MAX;
+        sd.MaxAnisotropy = 1;
+        if (FAILED(device11->CreateBuffer(&cbd, nullptr, &rt_alb_cb)) ||
+            FAILED(device11->CreateSamplerState(&sd, &rt_alb_smp)))
+            return false;
+    }
+    rt_s_alb.release();
+    rt_alb_n = 0;
+    if (!rt_make_shared(device11, rt_s_alb, n, 1, DXGI_FORMAT_R8G8B8A8_UNORM, false, "albedo table"))
+    {
+        rt_s_alb.release();
+        rt_write_alpha_descs();
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = n;
+    td.Height = 1;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    ID3D11Texture2D* work = nullptr;
+    ID3D11UnorderedAccessView* uav = nullptr;
+    if (FAILED(device11->CreateTexture2D(&td, nullptr, &work)) ||
+        FAILED(device11->CreateUnorderedAccessView(work, nullptr, &uav)))
+    {
+        Msg("! [RT] cannot create albedo work texture (%u)", n);
+        rt_rel(uav);
+        rt_rel(work);
+        rt_s_alb.release();
+        rt_write_alpha_descs();
+        return false;
+    }
+    CTimer timer;
+    timer.Start();
+    ID3DDeviceContextState* engine_state = nullptr;
+    ctx1->SwapDeviceContextState(rt_state11, &engine_state);
+    const float grey[4] = { 0.4f, 0.4f, 0.4f, 1.f };
+    ctx1->ClearUnorderedAccessViewFloat(uav, grey);
+    u32 done = 0;
+    for (u32 k = 0; k < n; ++k)
+    {
+        ID3D11ShaderResourceView* srv = tex[k] ? tex[k]->get_SRView() : nullptr;
+        if (!srv)
+            continue;
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (FAILED(ctx1->Map(rt_alb_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+            continue;
+        u32* c = static_cast<u32*>(m.pData);
+        c[0] = k;
+        c[1] = c[2] = c[3] = 0;
+        ctx1->Unmap(rt_alb_cb, 0);
+        ctx1->CSSetShader(rt_alb_cs, nullptr, 0);
+        ctx1->CSSetConstantBuffers(0, 1, &rt_alb_cb);
+        ctx1->CSSetSamplers(0, 1, &rt_alb_smp);
+        ctx1->CSSetShaderResources(0, 1, &srv);
+        ctx1->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        ctx1->Dispatch(1, 1, 1);
+        ++done;
+    }
+    ctx1->ClearState();
+    ctx1->CopyResource(rt_s_alb.t11, work);
+    ctx1->SwapDeviceContextState(engine_state, nullptr);
+    rt_rel(engine_state);
+    ctx1->Flush();
+    uav->Release();
+    work->Release();
+    rt_alb_n = n;
+    rt_write_alpha_descs();
+    Msg("* [RT] albedo table: %u of %u materials, %u ms", done, n, u32(timer.GetElapsed_ms()));
     return true;
 }
 
@@ -1563,6 +1810,9 @@ void rt_dbg_shutdown()
     rt_rel(rt_alpha_cs);
     rt_rel(rt_alpha_cb);
     rt_rel(rt_alpha_smp);
+    rt_rel(rt_alb_cs);
+    rt_rel(rt_alb_cb);
+    rt_rel(rt_alb_smp);
     rt_dbg_tried = false;
     rt_dbg_ok = false;
 }
@@ -1613,6 +1863,9 @@ void Tick(ID3D11Device* device11)
         ok = got && rt_build_scene(mesh.v.data(), u32(mesh.v.size()), mesh.i.data(), u32(mesh.i.size() / 3), &mesh);
         if (ok && rt_a_tris && !mesh.tex.empty())
             rt_alpha_build(device11, mesh.tex);
+        if (ok && !mesh.mtex.empty())
+            rt_albedo_build(device11, mesh.mtex);
+        Msg("* [RT] path tracing data: %s (%u materials)", rt_pt_ready() ? "ready" : "incomplete", u32(mesh.mtex.size()));
         rt_built_key = key;
         rt_built_any = true;
     }
@@ -1652,7 +1905,7 @@ void Tick(ID3D11Device* device11)
 
 // color: scene color (debug views) or, with mask_only, the R8 sun-visibility target (sized like the depth)
 static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
-    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool mask_only, bool refl = false, bool local = false, bool denoise = false)
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool mask_only, bool refl = false, bool local = false, bool denoise = false, bool pt = false)
 {
     if (!ps_r__rt || !rt_ok || !rt_tlas || !color || !depth || !ctx1)
         return false;
@@ -1717,7 +1970,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     pc.opt[2] = pc.opt[3] = 0.f;
 
     // the local light pass runs right after the sun pass of the same frame and reuses its depth / normals
-    const bool do_prep = !(local || denoise) || rt_prep_frame != Device.dwFrame;
+    const bool do_prep = !(local || denoise || pt) || rt_prep_frame != Device.dwFrame;
     bool mapped = true;
     if (do_prep)
     {
@@ -1769,7 +2022,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     tc.sun[0] = sun.x;
     tc.sun[1] = sun.y;
     tc.sun[2] = sun.z;
-    tc.mode = denoise ? 10u : (local ? 9u : (mask_only ? 5u : (refl ? 7u : u32(ps_r__rt_debug))));
+    tc.mode = pt ? 11u : denoise ? 10u : (local ? 9u : (mask_only ? 5u : (refl ? 7u : u32(ps_r__rt_debug))));
     tc.cam[0] = Device.vCameraPosition.x;
     tc.cam[1] = Device.vCameraPosition.y;
     tc.cam[2] = Device.vCameraPosition.z;
@@ -1879,6 +2132,47 @@ bool LocalLights(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Textu
         rt_local_data.par[i][0] = lights[i].radius;
     }
     return RunPass(device11, ctx1, mask, depth, gbuffer, gbuffer_packed, true, false, true);
+}
+
+// Path tracing: indirect light of every pixel (rgb: bounced light, a: sky visibility, see mode 11 of the shader).
+bool PathTrace(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* target, ID3D11Texture2D* depth,
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, const LocalLight* lights, u32 count)
+{
+    if (!ps_r__pt || ps_r__rt_debug || !rt_pt_ready())
+        return false;
+    std::memset(rt_local_data.pos, 0, sizeof(rt_local_data.pos));
+    std::memset(rt_local_data.par, 0, sizeof(rt_local_data.par));
+    std::memset(rt_local_data.col, 0, sizeof(rt_local_data.col));
+    for (u32 i = 0; lights && i < count && i < 4; ++i)
+    {
+        rt_local_data.pos[i][0] = lights[i].pos[0];
+        rt_local_data.pos[i][1] = lights[i].pos[1];
+        rt_local_data.pos[i][2] = lights[i].pos[2];
+        rt_local_data.pos[i][3] = lights[i].range;
+        rt_local_data.par[i][0] = lights[i].radius;
+        rt_local_data.col[i][0] = lights[i].color[0];
+        rt_local_data.col[i][1] = lights[i].color[1];
+        rt_local_data.col[i][2] = lights[i].color[2];
+    }
+    std::memset(rt_local_data.pt, 0, sizeof(rt_local_data.pt));
+    rt_local_data.pt[0][0] = float(ps_r__pt_bounces);
+    rt_local_data.pt[0][1] = float(ps_r__pt_spp);
+    rt_local_data.pt[0][2] = ps_r__pt_dist;
+    rt_local_data.pt[0][3] = 1.f;
+    if (g_pGamePersistent)
+    {
+        const auto& env = g_pGamePersistent->Environment().CurrentEnv;
+        rt_local_data.pt[1][0] = env.sun_color.x * ps_r2_sun_lumscale;
+        rt_local_data.pt[1][1] = env.sun_color.y * ps_r2_sun_lumscale;
+        rt_local_data.pt[1][2] = env.sun_color.z * ps_r2_sun_lumscale;
+        // average sky radiance (what hmodel() makes of the environment cube), only used for secondary bounces
+        const float k = 2.f * ps_r2_sun_lumscale_hemi * 0.6f;
+        rt_local_data.pt[2][0] = env.env_color.x * k * env.env_color.x * k;
+        rt_local_data.pt[2][1] = env.env_color.y * k * env.env_color.y * k;
+        rt_local_data.pt[2][2] = env.env_color.z * k * env.env_color.z * k;
+    }
+    rt_local_data.pt[1][3] = 1.f;
+    return RunPass(device11, ctx1, target, depth, gbuffer, gbuffer_packed, true, false, false, false, true);
 }
 
 // Depth / normal aware blur of an RGBA8 visibility mask (sun + AO, or 4 local lights). Call after the pass that
