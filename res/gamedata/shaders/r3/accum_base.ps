@@ -68,9 +68,9 @@ float4 main( p_volume I, float4 pos2d : SV_Position ) : SV_Target
                 #endif
         #endif
 
-        // ----- ray traced shadow (replaces the shadow map result)
+        // ----- ray traced shadow (on top of the shadow map: dynamic casters live only there)
         [branch] if (rtl_k.x > 0.5f)
-                s = s_rtlocal.Load( int3( int2( pos2d.xy ), 0 ) )[ (uint)( rtl_k.x - 0.5f ) ];
+                s *= s_rtlocal.Load( int3( int2( pos2d.xy ), 0 ) )[ (uint)( rtl_k.x - 0.5f ) ];
 
         // ----- lightmap
         float4         lightmap= 1.h;

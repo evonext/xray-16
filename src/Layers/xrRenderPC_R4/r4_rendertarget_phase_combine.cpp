@@ -716,7 +716,10 @@ void CRenderTarget::phase_combine_volumetric()
 }
 #if defined(XR_DLSS)
 // Local lights (point / spot, static and dynamic: lamps, fires, the torch, artefacts) that get ray traced shadows.
-// Only lights without a shadow map are taken: RT shadows are new for them. The nearest ones win, 4 channels.
+// Lights with a shadow map are taken too: the light shader multiplies the RT visibility with the shadow map, so
+// dynamic casters (NPCs, the player) still shadow, and static geometry gets precise soft RT shadows on top.
+// A shadowed point light is exported as 6 faces (same position / range): they share one channel.
+// The nearest lights win, 4 channels.
 void CRenderTarget::rt_select_local_lights()
 {
     rt_local_n = 0;
@@ -739,6 +742,17 @@ void CRenderTarget::rt_select_local_lights()
         {
             if (!L || L->range < 0.5f)
                 continue;
+            bool dup = false;
+            for (const Cand& c : cand)
+            {
+                if (c.L->range == L->range && c.L->position.similar(L->position, 1e-4f))
+                {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup)
+                continue;
             const float outside = std::max(0.f, L->position.distance_to(Device.vCameraPosition) - L->range);
             if (outside > 25.f) // its lit area is far away from the camera
                 continue;
@@ -749,6 +763,8 @@ void CRenderTarget::rt_select_local_lights()
     add(RImplementation.LP_normal.v_spot);
     add(RImplementation.LP_pending.v_point);
     add(RImplementation.LP_pending.v_spot);
+    add(RImplementation.LP_normal.v_shadowed);
+    add(RImplementation.LP_pending.v_shadowed);
     if (cand.empty())
         return;
     std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.key < b.key; });
@@ -783,7 +799,9 @@ void CRenderTarget::rt_set_light_k(CBackend& cmd_list, light* L)
     {
         for (u32 i = 0; i < rt_local_n; ++i)
         {
-            if (rt_local_light[i] == L)
+            // same light (a shadowed point light arrives as 6 faces with identical position / range)
+            if (rt_local_light[i] == L ||
+                (rt_local_light[i]->range == L->range && rt_local_light[i]->position.similar(L->position, 1e-4f)))
             {
                 k = float(i + 1);
                 break;
