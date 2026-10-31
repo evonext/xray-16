@@ -2022,7 +2022,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     tc.sun[0] = sun.x;
     tc.sun[1] = sun.y;
     tc.sun[2] = sun.z;
-    tc.mode = pt ? 11u : denoise ? 10u : (local ? 9u : (mask_only ? 5u : (refl ? 7u : u32(ps_r__rt_debug))));
+    tc.mode = denoise ? (pt ? 12u : 10u) : pt ? 11u : (local ? 9u : (mask_only ? 5u : (refl ? 7u : u32(ps_r__rt_debug))));
     tc.cam[0] = Device.vCameraPosition.x;
     tc.cam[1] = Device.vCameraPosition.y;
     tc.cam[2] = Device.vCameraPosition.z;
@@ -2178,11 +2178,11 @@ bool PathTrace(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture
 // Depth / normal aware blur of an RGBA8 visibility mask (sun + AO, or 4 local lights). Call after the pass that
 // wrote the mask in the same frame.
 bool Denoise(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* mask, ID3D11Texture2D* depth,
-    ID3D11Texture2D* gbuffer, bool gbuffer_packed)
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool pt_data)
 {
-    if (!ps_r__rt_denoise || ps_r__rt_debug)
+    if (ps_r__rt_debug || (!ps_r__rt_denoise && !pt_data)) // path tracing at 1 path per pixel is always filtered
         return false;
-    return RunPass(device11, ctx1, mask, depth, gbuffer, gbuffer_packed, true, false, false, true);
+    return RunPass(device11, ctx1, mask, depth, gbuffer, gbuffer_packed, true, false, false, true, pt_data);
 }
 
 // Characters (NPCs, monsters) are not in the BVH: they join the rays as capsules fitted to their bounding boxes.

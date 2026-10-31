@@ -188,7 +188,9 @@ _out main ( _input I, uint iSample : SV_SAMPLEINDEX )
 			float3 sky1 = max(hd1 - L_ambient.rgb, 0.f);
 			float sky_vis = saturate((g.a - 0.01f) / 0.99f);
 			float3 bounced = 2.f * g.rgb * g.rgb * rtgi_k.y;
-			hdiffuse = lerp(hdiffuse, sky1 * sky_vis + L_ambient.rgb + bounced, rtgi_k.x);
+			// occ (SSAO / RTAO): small-scale contact shadows that a filtered 1-path estimate cannot resolve
+			float3 pt_diffuse = (sky1 * sky_vis + L_ambient.rgb + bounced) * occ;
+			hdiffuse = lerp(hdiffuse, pt_diffuse, rtgi_k.x);
 		}
 	}
 

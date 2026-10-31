@@ -871,7 +871,7 @@ void CRenderTarget::rt_pt_update()
     ID3D11Texture2D* gbs = (gb._get() && gb->pSurface) ? gb->pSurface : nullptr;
     const bool ok = rt::PathTrace(HW.pDevice, HW.pContext1, rt_RTGI->pSurface, rt_Base_Depth->pSurface, gbs, packed, ll, n);
     if (ok)
-        rt::Denoise(HW.pDevice, HW.pContext1, rt_RTGI->pSurface, rt_Base_Depth->pSurface, gbs, packed);
+        rt::Denoise(HW.pDevice, HW.pContext1, rt_RTGI->pSurface, rt_Base_Depth->pSurface, gbs, packed, true);
     rt_pt_valid = ok;
 }
 #endif

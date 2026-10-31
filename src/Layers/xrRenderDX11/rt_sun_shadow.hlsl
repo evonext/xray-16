@@ -426,11 +426,13 @@ void local_pixel(int2 p, float4 c)
 
 // ---- mode 10: denoise of an RGBA8 visibility mask (t7 = raw mask, t1 depth, t2 normals) --------------------
 // 16 taps on a golden-angle spiral (rotated per pixel), weights from depth difference and normal agreement.
-void denoise_pixel(int2 p, float4 c)
+// pt: path tracing data (mode 12) - a = 0 means "no data" (grass, models, HUD): such pixels are neither filtered
+// nor mixed into their neighbours, otherwise grass would get the dark result of the ground under it and vice versa.
+void denoise_pixel(int2 p, float4 c, bool pt)
 {
     const float4 centre = t_color.Load(int3(p, 0));
     const float z0 = t_z.Load(int3(p, 0));
-    if (z0 <= 0.0) // sky / HUD
+    if (z0 <= 0.0 || (pt && centre.a <= 0.0)) // sky / HUD / no data
     {
         u_out[p] = centre;
         return;
@@ -439,7 +441,7 @@ void denoise_pixel(int2 p, float4 c)
     const bool has_n = dot(ne0, ne0) > 1e-8;
     const float3 n0 = has_n ? oct_decode(ne0) : float3(0, 0, 1);
     const float rot = ign(float2(p), ex0.x) * 6.2831853;
-    const float radius = 4.5;
+    const float radius = pt ? 8.0 : 4.5;
     float4 acc = centre;
     float wsum = 1.0;
     [unroll]
@@ -452,6 +454,9 @@ void denoise_pixel(int2 p, float4 c)
         const float zq = t_z.Load(int3(q, 0));
         if (zq <= 0.0)
             continue;
+        const float4 vq = t_color.Load(int3(q, 0));
+        if (pt && vq.a <= 0.0)
+            continue;
         const float wz = exp(-abs(zq - z0) / (0.04 * z0 + 0.03));
         float wn = 1.0;
         if (has_n)
@@ -460,7 +465,7 @@ void denoise_pixel(int2 p, float4 c)
             wn = dot(neq, neq) > 1e-8 ? pow(saturate(dot(n0, oct_decode(neq))), 24.0) : 0.0;
         }
         const float w = wz * wn;
-        acc += t_color.Load(int3(q, 0)) * w;
+        acc += vq * w;
         wsum += w;
     }
     u_out[p] = acc / wsum;
@@ -621,9 +626,14 @@ void pt_pixel(int2 p, float4 c)
         return;
     }
     // surfaces that are not in the BVH (grass, models, NPCs): no data
+    // the closest hit of a short ray through the pixel must lie on the visible point itself; grass a few cm above
+    // the ground used to pass this test and got the (dark) paths that start inside the ground
     const float3 vdir = pixel_dir(p);
-    float hb;
-    if (trace_sun(c.xyz - vdir * 0.15, vdir, 0.30, hb) > 0.5)
+    const float dist0 = length(cam_pos - c.xyz);
+    const float tol = 0.02 + dist0 * 0.0015;
+    float tb;
+    float3 nb_, ab_;
+    if (!trace_closest(c.xyz - vdir * 0.25, vdir, 0.50, tb, nb_, ab_) || abs(tb - 0.25) > tol)
     {
         u_out[p] = float4(0, 0, 0, 0);
         return;
@@ -710,9 +720,9 @@ void main(uint3 id : SV_DispatchThreadID)
         local_pixel(p, c);
         return;
     }
-    if (mode == 10)
+    if (mode == 10 || mode == 12)
     {
-        denoise_pixel(p, c);
+        denoise_pixel(p, c, mode == 12);
         return;
     }
     if (mode == 11)
