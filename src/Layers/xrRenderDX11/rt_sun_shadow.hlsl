@@ -37,6 +37,8 @@ cbuffer L : register(b1)
 {
     float4 l_pos[4]; // xyz: world position, w: range (<= 0: slot unused)
     float4 l_par[4]; // x: radius of the light source (soft shadows)
+    float4 cap_a[16]; // dynamic occluders (characters): xyz capsule segment start, w radius (<= 0: unused)
+    float4 cap_b[16]; // xyz capsule segment end
 };
 
 RaytracingAccelerationStructure scene : register(t0);
@@ -91,6 +93,41 @@ float3 pick_delta(float4 c, float4 a, float4 b)
     return float3(0, 0, 0);
 }
 
+// ray vs capsule (segment pa-pb, radius ra), nearest positive t or -1. A ray that starts close to the capsule axis
+// belongs to the character itself (its own surface): no self shadowing from the approximation.
+float cap_hit(float3 ro, float3 rd, float3 pa, float3 pb, float ra)
+{
+    const float3 ba = pb - pa;
+    const float baba = dot(ba, ba);
+    const float3 oa = ro - pa;
+    const float baoa = dot(ba, oa);
+    const float h0 = saturate(baoa / max(baba, 1e-6));
+    const float3 dd = oa - ba * h0;
+    if (dot(dd, dd) < ra * ra * 1.8)
+        return -1.0;
+    const float bard = dot(ba, rd);
+    const float rdoa = dot(rd, oa);
+    const float oaoa = dot(oa, oa);
+    const float a = baba - bard * bard;
+    float b = baba * rdoa - baoa * bard;
+    float c = baba * oaoa - baoa * baoa - ra * ra * baba;
+    float h = b * b - a * c;
+    if (h >= 0.0 && a > 1e-6)
+    {
+        const float t = (-b - sqrt(h)) / a;
+        const float y = baoa + t * bard;
+        if (y > 0.0 && y < baba)
+            return t;
+        const float3 oc = (y <= 0.0) ? oa : ro - pb;
+        b = dot(rd, oc);
+        c = dot(oc, oc) - ra * ra;
+        h = b * b - c;
+        if (h > 0.0)
+            return -b - sqrt(h);
+    }
+    return -1.0;
+}
+
 // 1 = the sun is visible from origin along dir, 0 = blocked (opaque hit, or an alpha-tested hit that passes the test)
 float trace_sun(float3 origin, float3 dir, float tmax, out float hit_t)
 {
@@ -130,13 +167,28 @@ float trace_sun(float3 origin, float3 dir, float tmax, out float hit_t)
             break;
         }
     }
+    float res = 1.0;
     hit_t = tmax;
     if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
     {
         hit_t = q.CommittedRayT();
-        return 0.0;
+        res = 0.0;
     }
-    return 1.0;
+    // characters are not in the BVH: capsules
+    [loop]
+    for (uint k = 0; k < 16; ++k)
+    {
+        const float ra = cap_a[k].w;
+        if (ra <= 0.0)
+            break;
+        const float t = cap_hit(origin, dir, cap_a[k].xyz, cap_b[k].xyz, ra);
+        if (t > 0.0 && t < hit_t)
+        {
+            hit_t = t;
+            res = 0.0;
+        }
+    }
+    return res;
 }
 
 float ign(float2 p, float frame)
@@ -360,6 +412,48 @@ void local_pixel(int2 p, float4 c)
     u_out[p] = res;
 }
 
+// ---- mode 10: denoise of an RGBA8 visibility mask (t7 = raw mask, t1 depth, t2 normals) --------------------
+// 16 taps on a golden-angle spiral (rotated per pixel), weights from depth difference and normal agreement.
+void denoise_pixel(int2 p, float4 c)
+{
+    const float4 centre = t_color.Load(int3(p, 0));
+    const float z0 = t_z.Load(int3(p, 0));
+    if (z0 <= 0.0) // sky / HUD
+    {
+        u_out[p] = centre;
+        return;
+    }
+    const float2 ne0 = t_n.Load(int3(p, 0));
+    const bool has_n = dot(ne0, ne0) > 1e-8;
+    const float3 n0 = has_n ? oct_decode(ne0) : float3(0, 0, 1);
+    const float rot = ign(float2(p), ex0.x) * 6.2831853;
+    const float radius = 4.5;
+    float4 acc = centre;
+    float wsum = 1.0;
+    [unroll]
+    for (uint i = 0; i < 16; ++i)
+    {
+        const float r = radius * sqrt((float(i) + 0.5) / 16.0);
+        const float th = float(i) * 2.39996323 + rot;
+        const int2 q = clamp(p + int2(round(r * cos(th)), round(r * sin(th))), int2(0, 0),
+            int2(int(width) - 1, int(height) - 1));
+        const float zq = t_z.Load(int3(q, 0));
+        if (zq <= 0.0)
+            continue;
+        const float wz = exp(-abs(zq - z0) / (0.04 * z0 + 0.03));
+        float wn = 1.0;
+        if (has_n)
+        {
+            const float2 neq = t_n.Load(int3(q, 0));
+            wn = dot(neq, neq) > 1e-8 ? pow(saturate(dot(n0, oct_decode(neq))), 24.0) : 0.0;
+        }
+        const float w = wz * wn;
+        acc += t_color.Load(int3(q, 0)) * w;
+        wsum += w;
+    }
+    u_out[p] = acc / wsum;
+}
+
 [RootSignature(RS)]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -378,6 +472,11 @@ void main(uint3 id : SV_DispatchThreadID)
     if (mode == 9)
     {
         local_pixel(p, c);
+        return;
+    }
+    if (mode == 10)
+    {
+        denoise_pixel(p, c);
         return;
     }
     float4 scene_col = float4(0, 0, 0, 1);

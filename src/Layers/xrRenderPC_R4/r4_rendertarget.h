@@ -59,8 +59,9 @@ public:
     ref_rt rt_RTSun; // R8, ray traced sun visibility (1 lit), read by the sun shader
     bool rt_ao_valid{}; // rt_RTSun.g holds this frame's ambient occlusion
     bool rt_sun_valid{}; // rt_RTSun holds this frame's mask
-    ref_rt rt_RTLocal; // RGBA8, ray traced visibility of up to 4 local lights, one per channel (1 = lit)
-    light* rt_local_light[4]{}; // light assigned to each channel this frame
+    ref_rt rt_RTLocal; // RGBA8, ray traced visibility of local lights 1..4, one per channel (1 = lit)
+    ref_rt rt_RTLocal2; // lights 5..8
+    light* rt_local_light[8]{}; // light assigned to each channel this frame
     u32 rt_local_n{};
     bool rt_local_valid{}; // rt_RTLocal holds this frame's masks
     void rt_sun_mask_update();

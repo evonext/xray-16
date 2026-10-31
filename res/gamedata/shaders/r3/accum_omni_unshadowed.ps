@@ -5,6 +5,7 @@
 // light's visibility (1 = reaches the pixel), 0 = this light is not ray traced
 uniform float4 rtl_k;
 Texture2D<float4> s_rtlocal;
+Texture2D<float4> s_rtlocal2; // lights 5..8
 
 //	TODO: DX10: Move to Load
 #ifdef MSAA_OPTIMIZATION
@@ -42,7 +43,11 @@ float4 main ( float4 tc:TEXCOORD0, float4 pos2d : SV_Position ) : SV_Target
 	float4	light 		= plight_local( m, _P, _N, Ldynamic_pos, Ldynamic_pos.w, rsqr );
 	float	rtl	= 1.0f;
 	[branch] if (rtl_k.x > 0.5f)
-		rtl = s_rtlocal.Load( int3( int2( pos2d.xy ), 0 ) )[ (uint)( rtl_k.x - 0.5f ) ];
+	{
+		uint ch = (uint)( rtl_k.x - 0.5f );
+		float4 rtm = ( ch < 4u ) ? s_rtlocal.Load( int3( int2( pos2d.xy ), 0 ) ) : s_rtlocal2.Load( int3( int2( pos2d.xy ), 0 ) );
+		rtl = rtm[ ch & 3u ];
+	}
 	return 	blendp( Ldynamic_color * light * rtl, tc);
 }
 

@@ -173,6 +173,7 @@ void CBlender_accum_spot::Compile(CBlender_Compile& C)
         C.r_dx11Texture("s_lmap", C.L_textures[0]);
         C.r_dx11Texture("s_accumulator", r2_RT_accum);
         C.r_dx11Texture("s_rtlocal", r2_RT_rtlocal);
+        C.r_dx11Texture("s_rtlocal2", r2_RT_rtlocal2);
 
         C.r_dx11Sampler("smp_nofilter");
         C.r_dx11Sampler("smp_material");
@@ -200,6 +201,7 @@ void CBlender_accum_spot::Compile(CBlender_Compile& C)
         C.r_dx11Texture("s_smap", r2_RT_smap_depth);
         C.r_dx11Texture("s_accumulator", r2_RT_accum);
         C.r_dx11Texture("s_rtlocal", r2_RT_rtlocal);
+        C.r_dx11Texture("s_rtlocal2", r2_RT_rtlocal2);
 
         C.r_dx11Sampler("smp_nofilter");
         C.r_dx11Sampler("smp_material");
@@ -229,6 +231,7 @@ void CBlender_accum_spot::Compile(CBlender_Compile& C)
         C.r_dx11Texture("s_smap", r2_RT_smap_depth);
         C.r_dx11Texture("s_accumulator", r2_RT_accum);
         C.r_dx11Texture("s_rtlocal", r2_RT_rtlocal);
+        C.r_dx11Texture("s_rtlocal2", r2_RT_rtlocal2);
 
         C.r_dx11Sampler("smp_nofilter");
         C.r_dx11Sampler("smp_material");
@@ -257,6 +260,7 @@ void CBlender_accum_spot::Compile(CBlender_Compile& C)
         C.r_dx11Texture("s_smap", r2_RT_smap_depth);
         C.r_dx11Texture("s_accumulator", r2_RT_accum);
         C.r_dx11Texture("s_rtlocal", r2_RT_rtlocal);
+        C.r_dx11Texture("s_rtlocal2", r2_RT_rtlocal2);
 
         C.r_dx11Sampler("smp_nofilter");
         C.r_dx11Sampler("smp_material");
@@ -358,6 +362,7 @@ void CBlender_accum_spot_msaa::Compile(CBlender_Compile& C)
         C.r_dx11Texture("s_lmap", C.L_textures[0]);
         C.r_dx11Texture("s_accumulator", r2_RT_accum);
         C.r_dx11Texture("s_rtlocal", r2_RT_rtlocal);
+        C.r_dx11Texture("s_rtlocal2", r2_RT_rtlocal2);
 
         C.r_dx11Sampler("smp_nofilter");
         C.r_dx11Sampler("smp_material");
@@ -385,6 +390,7 @@ void CBlender_accum_spot_msaa::Compile(CBlender_Compile& C)
         C.r_dx11Texture("s_smap", r2_RT_smap_depth);
         C.r_dx11Texture("s_accumulator", r2_RT_accum);
         C.r_dx11Texture("s_rtlocal", r2_RT_rtlocal);
+        C.r_dx11Texture("s_rtlocal2", r2_RT_rtlocal2);
 
         C.r_dx11Sampler("smp_nofilter");
         C.r_dx11Sampler("smp_material");
@@ -414,6 +420,7 @@ void CBlender_accum_spot_msaa::Compile(CBlender_Compile& C)
         C.r_dx11Texture("s_smap", r2_RT_smap_depth);
         C.r_dx11Texture("s_accumulator", r2_RT_accum);
         C.r_dx11Texture("s_rtlocal", r2_RT_rtlocal);
+        C.r_dx11Texture("s_rtlocal2", r2_RT_rtlocal2);
 
         C.r_dx11Sampler("smp_nofilter");
         C.r_dx11Sampler("smp_material");
@@ -442,6 +449,7 @@ void CBlender_accum_spot_msaa::Compile(CBlender_Compile& C)
         C.r_dx11Texture("s_smap", r2_RT_smap_depth);
         C.r_dx11Texture("s_accumulator", r2_RT_accum);
         C.r_dx11Texture("s_rtlocal", r2_RT_rtlocal);
+        C.r_dx11Texture("s_rtlocal2", r2_RT_rtlocal2);
 
         C.r_dx11Sampler("smp_nofilter");
         C.r_dx11Sampler("smp_material");

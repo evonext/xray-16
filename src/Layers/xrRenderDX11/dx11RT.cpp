@@ -8,6 +8,8 @@
 #include "xrEngine/IGame_Level.h"
 #include "xrEngine/IGame_Persistent.h"
 #include "xrEngine/Environment.h"
+#include "xrEngine/xr_object.h"
+#include "xrEngine/IObjectPhysicsCollision.h"
 #include "xrCDB/xr_area.h"
 #include "xrCore/FMesh.hpp"
 #include "xrCore/stream_reader.h"
@@ -115,6 +117,8 @@ struct RtLightsCb // matches cbuffer L (b1) in rt_sun_shadow.hlsl
 {
     float pos[4][4]; // xyz: world position, w: range (<= 0: slot unused)
     float par[4][4]; // x: radius of the light source
+    float cap_a[16][4]; // dynamic occluders (characters) as capsules: xyz segment start, w radius (<= 0: unused)
+    float cap_b[16][4]; // xyz segment end
 };
 ID3D12Resource* rt_light_cb[2] = {}; // upload buffers, one per command allocator slot
 u8* rt_light_cb_ptr[2] = {};
@@ -1648,7 +1652,7 @@ void Tick(ID3D11Device* device11)
 
 // color: scene color (debug views) or, with mask_only, the R8 sun-visibility target (sized like the depth)
 static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* color, ID3D11Texture2D* depth,
-    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool mask_only, bool refl = false, bool local = false)
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed, bool mask_only, bool refl = false, bool local = false, bool denoise = false)
 {
     if (!ps_r__rt || !rt_ok || !rt_tlas || !color || !depth || !ctx1)
         return false;
@@ -1713,7 +1717,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     pc.opt[2] = pc.opt[3] = 0.f;
 
     // the local light pass runs right after the sun pass of the same frame and reuses its depth / normals
-    const bool do_prep = !local || rt_prep_frame != Device.dwFrame;
+    const bool do_prep = !(local || denoise) || rt_prep_frame != Device.dwFrame;
     bool mapped = true;
     if (do_prep)
     {
@@ -1746,6 +1750,8 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
         return false;
     rt_prep_frame = Device.dwFrame;
     }
+    if (denoise)
+        ctx1->CopyResource(rt_s_in.t11, color); // the raw mask is the filter input (t7)
     const u64 v_inputs = ++rt_fence_value;
     rt_ctx4->Signal(rt_fence11, v_inputs);
     ctx1->Flush();
@@ -1763,7 +1769,7 @@ static bool RunPass(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Te
     tc.sun[0] = sun.x;
     tc.sun[1] = sun.y;
     tc.sun[2] = sun.z;
-    tc.mode = local ? 9u : (mask_only ? 5u : (refl ? 7u : u32(ps_r__rt_debug)));
+    tc.mode = denoise ? 10u : (local ? 9u : (mask_only ? 5u : (refl ? 7u : u32(ps_r__rt_debug))));
     tc.cam[0] = Device.vCameraPosition.x;
     tc.cam[1] = Device.vCameraPosition.y;
     tc.cam[2] = Device.vCameraPosition.z;
@@ -1862,7 +1868,8 @@ bool LocalLights(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Textu
 {
     if (!ps_r__rt_lights || ps_r__rt_debug || !lights || count == 0)
         return false;
-    std::memset(&rt_local_data, 0, sizeof(rt_local_data));
+    std::memset(rt_local_data.pos, 0, sizeof(rt_local_data.pos));
+    std::memset(rt_local_data.par, 0, sizeof(rt_local_data.par));
     for (u32 i = 0; i < count && i < 4; ++i)
     {
         rt_local_data.pos[i][0] = lights[i].pos[0];
@@ -1872,6 +1879,76 @@ bool LocalLights(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Textu
         rt_local_data.par[i][0] = lights[i].radius;
     }
     return RunPass(device11, ctx1, mask, depth, gbuffer, gbuffer_packed, true, false, true);
+}
+
+// Depth / normal aware blur of an RGBA8 visibility mask (sun + AO, or 4 local lights). Call after the pass that
+// wrote the mask in the same frame.
+bool Denoise(ID3D11Device* device11, ID3D11DeviceContext1* ctx1, ID3D11Texture2D* mask, ID3D11Texture2D* depth,
+    ID3D11Texture2D* gbuffer, bool gbuffer_packed)
+{
+    if (!ps_r__rt_denoise || ps_r__rt_debug)
+        return false;
+    return RunPass(device11, ctx1, mask, depth, gbuffer, gbuffer_packed, true, false, false, true);
+}
+
+// Characters (NPCs, monsters) are not in the BVH: they join the rays as capsules fitted to their bounding boxes.
+void UpdateOccluders()
+{
+    std::memset(rt_local_data.cap_a, 0, sizeof(rt_local_data.cap_a));
+    std::memset(rt_local_data.cap_b, 0, sizeof(rt_local_data.cap_b));
+    if (!ps_r__rt || !ps_r__rt_npc || !g_pGamePersistent || !g_pGameLevel)
+        return;
+    static xr_vector<ISpatial*> list;
+    list.clear();
+    g_pGamePersistent->SpatialSpace.q_sphere(list, 0, STYPE_RENDERABLE, Device.vCameraPosition, 60.f);
+    struct Cap
+    {
+        float d;
+        float a[4];
+        float b[4];
+    };
+    static xr_vector<Cap> caps;
+    caps.clear();
+    IGameObject* view = g_pGameLevel->CurrentViewEntity();
+    for (ISpatial* sp : list)
+    {
+        IGameObject* obj = sp->dcast_GameObject();
+        if (!obj || obj == view)
+            continue;
+        const IObjectPhysicsCollision* col = obj->physics_collision();
+        if (!col || !col->physics_character()) // living characters only (not items, not ragdolls)
+            continue;
+        IRenderable* rd = sp->dcast_Renderable();
+        if (!rd)
+            continue;
+        IRenderVisual* iv = rd->GetRenderData().visual;
+        if (!iv)
+            continue;
+        const Fbox& bx = ((dxRender_Visual*)iv)->vis.box; // local space
+        Fvector c, e;
+        bx.getcenter(c);
+        bx.getradius(e);
+        rd->GetRenderData().xform.transform_tiny(c);
+        const float r = std::clamp(std::min(e.x, e.z) * 0.8f, 0.15f, 0.45f);
+        const float hy = std::max(e.y, r);
+        Cap k;
+        k.d = c.distance_to(Device.vCameraPosition);
+        k.a[0] = c.x;
+        k.a[1] = c.y - (hy - r);
+        k.a[2] = c.z;
+        k.a[3] = r;
+        k.b[0] = c.x;
+        k.b[1] = c.y + (hy - r);
+        k.b[2] = c.z;
+        k.b[3] = 1.f;
+        caps.push_back(k);
+    }
+    std::sort(caps.begin(), caps.end(), [](const Cap& x, const Cap& y) { return x.d < y.d; });
+    for (size_t i = 0; i < caps.size() && i < 16; ++i)
+    {
+        std::memcpy(rt_local_data.cap_a[i], caps[i].a, sizeof(float) * 4);
+        std::memcpy(rt_local_data.cap_b[i], caps[i].b, sizeof(float) * 4);
+    }
 }
 
 void OnLevelUnload()

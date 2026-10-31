@@ -726,7 +726,8 @@ void CRenderTarget::rt_select_local_lights()
     rt_local_valid = false;
     for (auto& l : rt_local_light)
         l = nullptr;
-    if (!ps_r__rt_lights || !ps_r__rt || RImplementation.o.msaa || !rt_RTLocal._get() || !rt_RTLocal->pSurface)
+    if (!ps_r__rt_lights || !ps_r__rt || RImplementation.o.msaa || !rt_RTLocal._get() || !rt_RTLocal->pSurface ||
+        !rt_RTLocal2._get() || !rt_RTLocal2->pSurface)
         return;
 
     struct Cand
@@ -753,10 +754,10 @@ void CRenderTarget::rt_select_local_lights()
             }
             if (dup)
                 continue;
-            const float outside = std::max(0.f, L->position.distance_to(Device.vCameraPosition) - L->range);
-            if (outside > 25.f) // its lit area is far away from the camera
+            const float d = L->position.distance_to(Device.vCameraPosition);
+            if (d - L->range > 25.f) // its lit area is far away from the camera
                 continue;
-            cand.push_back({ L, outside - 0.01f * L->range });
+            cand.push_back({ L, d });
         }
     };
     add(RImplementation.LP_normal.v_point);
@@ -769,10 +770,10 @@ void CRenderTarget::rt_select_local_lights()
         return;
     std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.key < b.key; });
 
-    rt::LocalLight ll[4];
+    rt::LocalLight ll[8];
     for (const Cand& c : cand)
     {
-        if (rt_local_n >= 4)
+        if (rt_local_n >= 8)
             break;
         rt_local_light[rt_local_n] = c.L;
         ll[rt_local_n].pos[0] = c.L->position.x;
@@ -786,8 +787,17 @@ void CRenderTarget::rt_select_local_lights()
 
     const bool packed = RImplementation.o.gbuffer_opt;
     const ref_rt& gb = packed ? rt_Position : rt_Normal;
-    rt_local_valid = rt::LocalLights(HW.pDevice, HW.pContext1, rt_RTLocal->pSurface, rt_Base_Depth->pSurface,
-        (gb._get() && gb->pSurface) ? gb->pSurface : nullptr, packed, ll, rt_local_n);
+    ID3D11Texture2D* gbs = (gb._get() && gb->pSurface) ? gb->pSurface : nullptr;
+    ID3D11Texture2D* masks[2] = { rt_RTLocal->pSurface, rt_RTLocal2->pSurface };
+    bool ok = true;
+    for (u32 m = 0; m * 4 < rt_local_n && ok; ++m)
+    {
+        const u32 n = std::min(4u, rt_local_n - m * 4);
+        ok = rt::LocalLights(HW.pDevice, HW.pContext1, masks[m], rt_Base_Depth->pSurface, gbs, packed, ll + m * 4, n);
+        if (ok)
+            rt::Denoise(HW.pDevice, HW.pContext1, masks[m], rt_Base_Depth->pSurface, gbs, packed);
+    }
+    rt_local_valid = ok;
     if (!rt_local_valid)
         rt_local_n = 0;
 }
@@ -815,12 +825,15 @@ void CRenderTarget::rt_sun_mask_update()
 {
     rt_sun_valid = false;
     rt_ao_valid = false;
+    rt::UpdateOccluders(); // characters as capsules for every ray of this frame
     if ((ps_r__rt_sun || ps_r__rt_ao) && !RImplementation.o.msaa && rt_RTSun._get() && rt_RTSun->pSurface)
     {
         const bool packed = RImplementation.o.gbuffer_opt;
         const ref_rt& gb = packed ? rt_Position : rt_Normal;
-        const bool ok = rt::SunMask(HW.pDevice, HW.pContext1, rt_RTSun->pSurface, rt_Base_Depth->pSurface,
-            (gb._get() && gb->pSurface) ? gb->pSurface : nullptr, packed);
+        ID3D11Texture2D* gbs = (gb._get() && gb->pSurface) ? gb->pSurface : nullptr;
+        const bool ok = rt::SunMask(HW.pDevice, HW.pContext1, rt_RTSun->pSurface, rt_Base_Depth->pSurface, gbs, packed);
+        if (ok)
+            rt::Denoise(HW.pDevice, HW.pContext1, rt_RTSun->pSurface, rt_Base_Depth->pSurface, gbs, packed);
         rt_sun_valid = ok && ps_r__rt_sun;
         rt_ao_valid = ok && ps_r__rt_ao;
     }
